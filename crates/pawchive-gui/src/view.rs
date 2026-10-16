@@ -550,12 +550,11 @@ impl App {
                 card(ui, p, p.warn, |ui| {
                     card_head(ui, p, Lead::Icon(Glyph::Pause, p.warn), "Paused", Some(counter));
                     bar(ui, m.fraction(), p.warn);
-                    ui.label(format!(
-                        "{} saved. {} partial {} kept.",
-                        human_size(m.bytes_saved()),
-                        partial,
-                        if partial == 1 { "file is" } else { "files are" }
-                    ));
+                    ui.label(match partial {
+                        0 => format!("{} saved.", human_size(m.bytes_saved())),
+                        1 => format!("{} saved. 1 partial file is kept.", human_size(m.bytes_saved())),
+                        n => format!("{} saved. {n} partial files are kept.", human_size(m.bytes_saved())),
+                    });
                     ui.label(dim(p, "Resume continues where each file stopped. Nothing is re-downloaded."));
                 });
             }
@@ -592,7 +591,12 @@ impl App {
                 card(ui, p, p.ok, |ui| {
                     card_head(ui, p, Lead::Glyph("✓", p.ok), "Finished — everything was saved", Some(counter));
                     bar(ui, 1.0, p.ok);
-                    ui.label(format!("{} saved in {}.", human_size(m.bytes_saved()), clock(m.elapsed(now))));
+                    ui.label(derive::finished_line(
+                        m.saved() - m.skipped(),
+                        &human_size(m.bytes_downloaded()),
+                        m.skipped(),
+                        &clock(m.elapsed(now)),
+                    ));
                     ui.add(egui::Label::new(dim(p, folder)).truncate());
                 });
             }

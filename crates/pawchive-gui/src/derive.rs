@@ -137,6 +137,18 @@ pub fn problems(n: usize) -> String {
     }
 }
 
+/// Second line of the finished card. Skipped files were already on disk, so they are not "saved in 0:00":
+/// `"1.2 MB saved in 0:09."`, `"1.2 MB saved in 0:09; 3 were already saved."`, or `"Nothing new to download: all 3 files were already saved."`.
+pub fn finished_line(downloaded: usize, bytes_downloaded: &str, skipped: usize, elapsed: &str) -> String {
+    match (downloaded, skipped) {
+        (_, 0) => format!("{bytes_downloaded} saved in {elapsed}."),
+        (0, 1) => "Nothing new to download: the file was already saved.".into(),
+        (0, n) => format!("Nothing new to download: all {n} files were already saved."),
+        (_, 1) => format!("{bytes_downloaded} saved in {elapsed}; 1 was already saved."),
+        (_, n) => format!("{bytes_downloaded} saved in {elapsed}; {n} were already saved."),
+    }
+}
+
 /// Last sentence of the finished-with-failures card when files were 404 at sizing:
 /// `" 1 isn't on Pawchive."` / `" 2 aren't on Pawchive."`, or empty when none. Leading space included.
 pub fn missing_sentence(n: usize) -> String {
@@ -159,6 +171,15 @@ pub fn missing_header_part(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_line_does_not_claim_skipped_files_were_saved_now() {
+        assert_eq!(finished_line(4, "1.2 MB", 0, "0:09"), "1.2 MB saved in 0:09.");
+        assert_eq!(finished_line(0, "0 B", 3, "0:00"), "Nothing new to download: all 3 files were already saved.");
+        assert_eq!(finished_line(0, "0 B", 1, "0:00"), "Nothing new to download: the file was already saved.");
+        assert_eq!(finished_line(2, "1.2 MB", 1, "0:09"), "1.2 MB saved in 0:09; 1 was already saved.");
+        assert_eq!(finished_line(2, "1.2 MB", 3, "0:09"), "1.2 MB saved in 0:09; 3 were already saved.");
+    }
     use pawchive_core::plan::Stat;
     use pawchive_core::session::{JobInfo, UiEvent};
     use std::time::Duration;

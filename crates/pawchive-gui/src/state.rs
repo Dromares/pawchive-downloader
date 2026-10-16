@@ -220,6 +220,16 @@ impl Model {
         self.rows.iter().map(|r| r.done).sum()
     }
 
+    /// Files that were already on disk and left alone.
+    pub fn skipped(&self) -> usize {
+        self.count(|s| matches!(s, RowState::Skipped))
+    }
+
+    /// Bytes written by this run: skipped files were already there, so they do not count.
+    pub fn bytes_downloaded(&self) -> u64 {
+        self.rows.iter().filter(|r| matches!(r.state, RowState::Done)).map(|r| r.done).sum()
+    }
+
     pub fn bytes_saved(&self) -> u64 {
         self.rows.iter().filter(|r| matches!(r.state, RowState::Done | RowState::Skipped)).map(|r| r.done).sum()
     }
@@ -319,7 +329,7 @@ impl Model {
     pub fn note_resume(&mut self) {
         if self.phase == Phase::Paused {
             self.phase = Phase::Downloading;
-            self.push_log(Level::Info, "Resumed");
+            // The session confirms with its own "Resumed" log event; logging here too printed it twice.
         }
     }
 
@@ -726,8 +736,11 @@ mod tests {
         m.note_pause();
         assert_eq!(m.phase, Phase::Paused);
         assert!(m.log.back().unwrap().text.contains("1 partial files kept"));
+        let log_len = m.log.len();
         m.note_resume();
         assert_eq!(m.phase, Phase::Downloading);
+        // The session's own "Resumed" event is the one log line; the model must not add a second.
+        assert_eq!(m.log.len(), log_len);
         m.note_cancel();
         m.apply(UiEvent::Download(Event::Cancelled { id: 0 }), now);
         m.apply(
