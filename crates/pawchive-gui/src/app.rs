@@ -112,8 +112,13 @@ impl App {
         handle: SessionHandle,
         rx: Receiver<UiEvent>,
     ) -> Self {
-        theme::install_fonts(&cc.egui_ctx);
-        theme::install_styles(&cc.egui_ctx);
+        Self::with_context(&cc.egui_ctx, settings, handle, rx)
+    }
+
+    /// `new` without the eframe window, so a test can drive the whole UI on a bare egui context.
+    fn with_context(ctx: &egui::Context, settings: Settings, handle: SessionHandle, rx: Receiver<UiEvent>) -> Self {
+        theme::install_fonts(ctx);
+        theme::install_styles(ctx);
         let (picker_tx, picker_rx) = channel();
         let (note_tx, note_rx) = channel();
         let mut app = App {
@@ -148,7 +153,7 @@ impl App {
         };
         if let Some(url) = dev::autoscan_url() {
             app.url = url;
-            app.perform(Action::Scan, &cc.egui_ctx);
+            app.perform(Action::Scan, ctx);
         }
         app
     }
@@ -563,6 +568,12 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
+}
+
+impl App {
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let pal = Pal::new(ctx.theme().into());
         self.dev_hooks(&ctx);
@@ -603,5 +614,86 @@ mod tests {
         let c = derive::default_checked();
         assert!(c.contains(&Category::Image) && c.contains(&Category::Video));
         assert!(!c.contains(&Category::Other));
+    }
+
+    /// Walks Tab through the real UI on a bare egui context, headless, and names each stop by its
+    /// accessibility label (DAN-1565: UI-SPEC §7 puts Browse… before the tabs and the bottom bar).
+    fn tab_walk(ready: bool) -> Vec<String> {
+        use pawchive_core::creator::CreatorRef;
+        use pawchive_core::model::Service;
+        use std::collections::HashMap;
+
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let (handle, rx) = pawchive_core::session::spawn(
+            Settings::default(),
+            Hosts::default(),
+            pawchive_core::session::Tuning::default(),
+            Arc::new(|| {}),
+        );
+        let mut app = App::with_context(&ctx, Settings::default(), handle, rx);
+        if ready {
+            let creator = CreatorRef { service: Service::Fanbox, id: "1".into() };
+            app.model.apply(UiEvent::ScanStarted(creator.clone()), Instant::now());
+            app.model.apply(UiEvent::ScanFinished { creator, posts: 1, files: vec![] }, Instant::now());
+        }
+        let mut nodes: HashMap<egui::accesskit::NodeId, String> = HashMap::new();
+        let mut frame = |app: &mut App, tab: bool| -> Option<String> {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1120.0, 760.0))),
+                ..Default::default()
+            };
+            if tab {
+                input.events.push(egui::Event::Key {
+                    key: Key::Tab,
+                    physical_key: Some(Key::Tab),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                });
+            }
+            let mut out = ctx.run_ui(input, |ui| app.draw(ui));
+            let update = out.platform_output.accesskit_update.take();
+            out.drop_without_applying_deltas();
+            let update = update?;
+            for (id, node) in update.nodes {
+                let name =
+                    node.label().or_else(|| node.value()).map_or_else(|| format!("{:?}", node.role()), str::to_string);
+                nodes.insert(id, name);
+            }
+            nodes.get(&update.focus).cloned()
+        };
+        for _ in 0..3 {
+            frame(&mut app, false);
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..40 {
+            frame(&mut app, true);
+            let Some(name) = frame(&mut app, false) else { continue };
+            if seen.first() == Some(&name) {
+                break; // wrapped around
+            }
+            seen.push(name);
+        }
+        seen
+    }
+
+    /// DAN-1565, UI-SPEC §7: a first run needs the folder picker before Download enables, so Browse…
+    /// comes right after the Extensions field and before the tabs, not after the whole file area.
+    #[test]
+    fn tab_reaches_browse_straight_after_extensions_and_before_the_tabs() {
+        for ready in [false, true] {
+            let order = tab_walk(ready);
+            let at = |name: &str| order.iter().position(|n| n == name);
+            let browse = at("Browse…").unwrap_or_else(|| panic!("Browse… is not tabbable: {order:?}"));
+            // The text fields are the unlabelled stops: the link field, then Extensions once a scan
+            // has made step 2 live.
+            let fields: Vec<_> = order.iter().enumerate().filter(|(_, n)| n.is_empty()).map(|(i, _)| i).collect();
+            assert_eq!(fields.len(), if ready { 2 } else { 1 }, "text fields: {order:?}");
+            assert_eq!(browse, fields[fields.len() - 1] + 1, "Browse… must follow the last field: {order:?}");
+            if ready {
+                assert!(browse < at("Files 0").unwrap(), "Browse… must come before the tabs: {order:?}");
+            }
+        }
     }
 }
