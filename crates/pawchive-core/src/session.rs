@@ -40,8 +40,11 @@ pub enum Command {
     Resume,
     /// Cancels the running download, or the running scan. `.part` files are kept for resume.
     Cancel,
-    /// Re-run the jobs of the last download that failed.
+    /// Re-run the jobs of the last download that failed *and can still work*: a permanent failure
+    /// (HTTP 404, the file is gone) is not retried.
     RetryFailed,
+    /// Re-run just these jobs (ids from [`JobInfo`]); ids that did not fail retryably are ignored.
+    RetryJobs(Vec<u64>),
 }
 
 /// What the UI needs to draw a download row.
@@ -241,7 +244,8 @@ impl Session {
             }
             Msg::Dl(ev) => {
                 match &ev {
-                    engine::Event::Failed { id, .. } => {
+                    // Only failures that a retry can fix; a 404 stays failed for good.
+                    engine::Event::Failed { id, permanent: false, .. } => {
                         self.failed.insert(*id);
                     }
                     engine::Event::Done { id, .. } | engine::Event::Skipped { id } => {
@@ -287,16 +291,26 @@ impl Session {
                     c.cancel();
                 }
             }
-            Command::RetryFailed => {
-                let jobs: Vec<Job> = self.last_jobs.iter().filter(|j| self.failed.contains(&j.id)).cloned().collect();
-                if jobs.is_empty() {
-                    self.log("No failed files to retry");
-                } else {
-                    self.failed.clear();
-                    self.run_jobs(jobs);
-                }
-            }
+            Command::RetryFailed => self.retry(None),
+            Command::RetryJobs(ids) => self.retry(Some(ids)),
         }
+    }
+
+    /// Re-run failed jobs: all of them, or only `only`.
+    fn retry(&mut self, only: Option<Vec<u64>>) {
+        if self.download.is_some() || self.scan.is_some() {
+            return self.log("Busy: a scan or download is already running");
+        }
+        let wanted = |id: u64| only.as_ref().is_none_or(|ids| ids.contains(&id));
+        let jobs: Vec<Job> =
+            self.last_jobs.iter().filter(|j| self.failed.contains(&j.id) && wanted(j.id)).cloned().collect();
+        if jobs.is_empty() {
+            return self.log("No failed files to retry");
+        }
+        for j in &jobs {
+            self.failed.remove(&j.id);
+        }
+        self.run_jobs(jobs);
     }
 
     fn start_scan(&mut self, url: &str) {

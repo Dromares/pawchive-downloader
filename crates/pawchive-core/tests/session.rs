@@ -215,3 +215,142 @@ fn skip_sizing_stops_the_probes_and_downloads_still_work() {
     });
     assert_eq!(s.done, n);
 }
+
+/// Mock site where chosen file paths answer with a fixed status until `healed` is set.
+fn flaky_site(
+    rt: &tokio::runtime::Runtime,
+    rules: Arc<std::sync::Mutex<std::collections::HashMap<String, u16>>>,
+    healed: Arc<std::sync::atomic::AtomicBool>,
+) -> common::Mock {
+    let page = fixture("fanbox-user-119251-posts.json");
+    rt.block_on(serve(move |req, _| {
+        if req.path.starts_with("/api/v1/fanbox/user/119251?o=0") {
+            return Resp::ok(&page);
+        }
+        if req.path.starts_with("/api/") {
+            return Resp::ok(b"[]");
+        }
+        let rule = rules.lock().unwrap().get(&req.path).copied();
+        match rule {
+            Some(404) => return Resp::status(404),
+            Some(code) if !healed.load(std::sync::atomic::Ordering::SeqCst) => return Resp::status(code),
+            _ => {}
+        }
+        let body = file_body(&req.path);
+        match req.range() {
+            Some("bytes=0-0") => Resp::status(206)
+                .header("Content-Range", &format!("bytes 0-0/{}", body.len()))
+                .header("Content-Type", "image/jpeg")
+                .tap_body(vec![body[0]]),
+            _ => Resp::ok(&body).header("Content-Type", "image/jpeg"),
+        }
+    }))
+}
+
+/// Scan, then run a full download in which `fail` maps file index -> status. Returns the job
+/// outcomes by id.
+fn failing_download(
+    handle: &pawchive_core::session::SessionHandle,
+    rx: &Receiver<UiEvent>,
+    rules: &Arc<std::sync::Mutex<std::collections::HashMap<String, u16>>>,
+    fail: &[(usize, u16)],
+    out: &Path,
+) -> Vec<(u64, bool)> {
+    handle.send(Command::Scan { url: "https://pawchive.pw/fanbox/user/119251".into() });
+    let files = wait_for(rx, |e| match e {
+        UiEvent::ScanFinished { files, .. } => Some(files),
+        _ => None,
+    });
+    wait_for(rx, |e| matches!(e, UiEvent::SizingFinished { .. }).then_some(()));
+    for (i, code) in fail {
+        rules.lock().unwrap().insert(format!("/data{}", files[*i].path), *code);
+    }
+    handle.send(Command::StartDownload {
+        selection: Selection { categories: Category::ALL.into_iter().collect(), include_preview: false },
+        custom_extensions: String::new(),
+        output: out.to_path_buf(),
+    });
+    let mut failed = vec![];
+    wait_for(rx, |e| match e {
+        UiEvent::Download(pawchive_core::engine::Event::Failed { id, permanent, .. }) => {
+            failed.push((id, permanent));
+            None
+        }
+        UiEvent::DownloadFinished(_) => Some(()),
+        _ => None,
+    });
+    failed.sort();
+    failed
+}
+
+/// A 404 is permanent, so "Retry failed" must not request that file again.
+#[test]
+fn retry_failed_skips_permanent_failures() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rules = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let healed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mock = flaky_site(&rt, rules.clone(), healed.clone());
+    let (handle, rx) = start(&mock.base);
+    let out = TempDir::new().unwrap();
+
+    let failed = failing_download(&handle, &rx, &rules, &[(0, 404), (1, 503)], out.path());
+    assert_eq!(failed, [(0, true), (1, false)]);
+
+    healed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = mock.count();
+    handle.send(Command::RetryFailed);
+    let mut touched = vec![];
+    let s = wait_for(&rx, |e| match e {
+        UiEvent::Download(pawchive_core::engine::Event::Started { id }) => {
+            touched.push(id);
+            None
+        }
+        UiEvent::DownloadFinished(s) => Some(s),
+        _ => None,
+    });
+    assert_eq!(touched, [1], "only the retryable failure runs again");
+    assert_eq!((s.done, s.failed), (1, 0), "{s:?}");
+    assert_eq!(mock.count() - before, 1, "one request: the 503 file; the 404 file is left alone");
+
+    // nothing retryable is left, so a second RetryFailed does nothing
+    let before = mock.count();
+    handle.send(Command::RetryFailed);
+    wait_for(&rx, |e| matches!(e, UiEvent::Log(m) if m.contains("No failed files")).then_some(()));
+    assert_eq!(mock.count(), before);
+}
+
+/// "Retry" on one row in the Problems tab re-runs just that file.
+#[test]
+fn retry_jobs_reruns_only_the_named_failures() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rules = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let healed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mock = flaky_site(&rt, rules.clone(), healed.clone());
+    let (handle, rx) = start(&mock.base);
+    let out = TempDir::new().unwrap();
+
+    let failed = failing_download(&handle, &rx, &rules, &[(1, 503), (2, 503), (3, 404)], out.path());
+    assert_eq!(failed, [(1, false), (2, false), (3, true)]);
+    healed.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // ids that did not fail retryably (0 succeeded, 3 is a 404) are ignored
+    handle.send(Command::RetryJobs(vec![2, 0, 3]));
+    let mut done = vec![];
+    let s = wait_for(&rx, |e| match e {
+        UiEvent::Download(pawchive_core::engine::Event::Done { id, .. }) => {
+            done.push(id);
+            None
+        }
+        UiEvent::DownloadFinished(s) => Some(s),
+        _ => None,
+    });
+    assert_eq!((done, s.done), (vec![2], 1));
+
+    // job 1 is still failed and can be retried afterwards
+    handle.send(Command::RetryFailed);
+    let s = wait_for(&rx, |e| match e {
+        UiEvent::DownloadFinished(s) => Some(s),
+        _ => None,
+    });
+    assert_eq!(s.done, 1);
+}
