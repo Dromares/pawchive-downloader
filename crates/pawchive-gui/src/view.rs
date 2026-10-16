@@ -1153,8 +1153,9 @@ fn ready_row(ui: &mut Ui, p: &Pal, cols: &Cols, r: &ReadyRow, _zebra: bool) {
 fn put_post(ui: &mut Ui, p: &Pal, cols: &Cols, post: &str) {
     if cols.rect().width() >= 620.0 {
         cols.put(ui, 2, false, |ui| {
-            // The tooltip is the full folder name; the cell reads "date · title".
-            ui.add(egui::Label::new(dim(p, post_label(post))).truncate()).on_hover_text(post);
+            // The tooltip is the full folder name, not the elided "date · title" the cell shows.
+            ui.add(egui::Label::new(dim(p, post_label(post))).truncate().show_tooltip_when_elided(false))
+                .on_hover_text(post);
         });
     }
 }
