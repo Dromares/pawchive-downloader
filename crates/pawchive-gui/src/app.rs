@@ -584,11 +584,20 @@ impl App {
         let (m, s) = (S4 as i8, 10);
 
         egui::Panel::top("title").frame(panel(m, m, 12, s)).show(ui, |ui| self.titlebar(ui, &pal, &mut acts));
-        egui::Panel::bottom("action").frame(panel(m, m, s, s)).show(ui, |ui| self.action_bar(ui, &pal, &mut acts));
+        // Tab order is widget creation order (UI-SPEC §7: the bottom bar is last), but the bar's panel
+        // must be declared before the central area to claim its strip. So the panel only reserves the
+        // strip; the bar's widgets are created after everything else, into that rect.
+        let bar = egui::Panel::bottom("action")
+            .frame(panel(m, m, s, s))
+            .show(ui, |ui| {
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), theme::BTN_H), egui::Sense::hover()).0
+            })
+            .inner;
         egui::Panel::left("setup").exact_size(LEFT_W).resizable(false).frame(panel(m, m, 14, 0)).show(ui, |ui| {
             self.left(ui, &pal, &mut acts);
         });
         egui::CentralPanel::default().frame(panel(m, m, 14, 12)).show(ui, |ui| self.centre(ui, &pal, &mut acts));
+        self.action_bar(&mut ui.new_child(egui::UiBuilder::new().max_rect(bar)), &pal, &mut acts);
 
         if self.settings_open {
             self.settings_modal(&ctx, &pal);
@@ -617,8 +626,9 @@ mod tests {
     }
 
     /// Walks Tab through the real UI on a bare egui context, headless, and names each stop by its
-    /// accessibility label (DAN-1565: UI-SPEC §7 puts Browse… before the tabs and the bottom bar).
-    fn tab_walk(ready: bool) -> Vec<String> {
+    /// accessibility label (UI-SPEC §7: Browse… before the tabs, the bottom bar last). `with_file`
+    /// adds an output folder and one file to the scan, so Download is enabled and tabbable.
+    fn tab_walk(ready: bool, with_file: bool) -> Vec<String> {
         use pawchive_core::creator::CreatorRef;
         use pawchive_core::model::Service;
         use std::collections::HashMap;
@@ -635,7 +645,23 @@ mod tests {
         if ready {
             let creator = CreatorRef { service: Service::Fanbox, id: "1".into() };
             app.model.apply(UiEvent::ScanStarted(creator.clone()), Instant::now());
-            app.model.apply(UiEvent::ScanFinished { creator, posts: 1, files: vec![] }, Instant::now());
+            let file = || pawchive_core::model::FileEntry {
+                post_id: "1".into(),
+                post_title: "t".into(),
+                post_published: None,
+                name: "a.jpg".into(),
+                path: "/a.jpg".into(),
+                preview_only: false,
+                node: None,
+                size: Some(10),
+                content_type: Some("image/jpeg".into()),
+                missing: false,
+            };
+            let files = if with_file { vec![file()] } else { vec![] };
+            app.model.apply(UiEvent::ScanFinished { creator, posts: 1, files }, Instant::now());
+            if with_file {
+                app.output = "/tmp/pawchive-tab-walk".into();
+            }
         }
         let mut nodes: HashMap<egui::accesskit::NodeId, String> = HashMap::new();
         let mut frame = |app: &mut App, tab: bool| -> Option<String> {
@@ -683,7 +709,7 @@ mod tests {
     #[test]
     fn tab_reaches_browse_straight_after_extensions_and_before_the_tabs() {
         for ready in [false, true] {
-            let order = tab_walk(ready);
+            let order = tab_walk(ready, false);
             let at = |name: &str| order.iter().position(|n| n == name);
             let browse = at("Browse…").unwrap_or_else(|| panic!("Browse… is not tabbable: {order:?}"));
             // The text fields are the unlabelled stops: the link field, then Extensions once a scan
@@ -695,5 +721,17 @@ mod tests {
                 assert!(browse < at("Files 0").unwrap(), "Browse… must come before the tabs: {order:?}");
             }
         }
+    }
+
+    /// DAN-1573, UI-SPEC §7: the bottom bar is the last stop. Egui's Tab order is widget creation
+    /// order and the bar's panel is declared before the central area, so it has to reserve its slot.
+    #[test]
+    fn tab_ends_on_the_bottom_bar_after_the_tabs_and_the_table() {
+        let order = tab_walk(true, true);
+        let at =
+            |name: &str| order.iter().position(|n| n == name).unwrap_or_else(|| panic!("{name} missing: {order:?}"));
+        let download = at("Download 1");
+        assert_eq!(download, order.len() - 1, "bottom bar must come last: {order:?}");
+        assert!(at("Browse…") < at("Files 1") && at("Files 1") < download, "{order:?}");
     }
 }
