@@ -9,3 +9,25 @@ eframe = { version = "0.37.0", default-features = false, features = ["accesskit"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 pawchive-core = { version = "0.1.0", path = "../pawchive-core" }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+
+# The binary is named after the app id (see `APP_ID` in `src/main.rs`) so that the desktop entry,
+# the icon name and the window's Wayland app_id / X11 WM_CLASS all agree.
+[[bin]]
+name = "pawchive-downloader"
+path = "src/main.rs"
+
+# Packaging (`cargo packager --release --formats appimage`, see "Building the AppImage" in the README).
+[package.metadata.packager]
+product-name = "Pawchive Downloader"
+identifier = "pw.pawchive.downloader"
+description = "Download a creator's files from Pawchive, with pause and resume."
+homepage = "https://github.com/Dromares/pawchive-downloader"
+formats = ["appimage"]
+icons = ["assets/pawchive-downloader-*.png"]
+binaries = [{ path = "pawchive-downloader", main = true }]
+
+[package.metadata.packager.deb]
+# cargo-packager builds the AppImage from the same data tree as a .deb, so this template drives the
+# AppImage's .desktop file too. It exists to set Categories (cargo-packager has no Network;FileTransfer
+# category), GenericName, Keywords and StartupWMClass.
+desktop-template = "assets/pawchive-downloader.desktop"

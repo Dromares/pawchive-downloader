@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name={{name}}
+GenericName=Creator File Downloader
+Comment={{comment}}
+Exec={{exec}}
+Icon={{icon}}
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=pawchive;download;downloader;archive;creator;files;
+StartupWMClass=pawchive-downloader
