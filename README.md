@@ -48,6 +48,69 @@ Needs a Rust toolchain and a C compiler (rustls' `aws-lc-rs` builds a small C li
 picker uses the XDG desktop portal through `rfd` (no GTK). Tests use saved fixtures and an in-process
 mock server; they never touch the network.
 
+## Building the AppImage
+
+The release AppImage is built inside an Ubuntu 22.04 root filesystem, so the binary only needs glibc
+2.35 (the floor for every distribution newer than Ubuntu 22.04 / Debian 12). Building on a rolling
+distribution would raise that floor. The steps below need no root, no Docker and no `sudo`: only
+`bwrap` (bubblewrap), `unshare`, `curl` and `tar` on the host. Run them from a clone of this repo; `$WORK`
+is any empty directory with about 6 GB free.
+
+1. Fetch and unpack the Ubuntu 22.04.5 base image (it is checked against Canonical's `SHA256SUMS`):
+
+   ```
+   WORK=$HOME/pawchive-appimage; mkdir -p $WORK/rootfs && cd $WORK
+   U=https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release
+   curl -fLO $U/ubuntu-base-22.04.5-base-amd64.tar.gz
+   curl -fsS $U/SHA256SUMS | grep ubuntu-base-22.04.5-base-amd64.tar.gz | sha256sum -c -
+   unshare -r tar -xzf ubuntu-base-22.04.5-base-amd64.tar.gz -C rootfs --no-same-owner --exclude='dev/*'
+   cp /etc/resolv.conf rootfs/etc/resolv.conf
+   echo 'APT::Sandbox::User "root";' > rootfs/etc/apt/apt.conf.d/99sandbox-root
+   ```
+
+2. Enter the image with `bwrap`. `REPO` is your clone; it is mounted at `/src`. `--clearenv` matters: a
+   `TMPDIR` inherited from the host does not exist in the image and makes `apt` fail.
+
+   ```
+   REPO=/path/to/pawchive-downloader
+   IN='bwrap --clearenv --unshare-user --uid 0 --gid 0 --bind '$WORK'/rootfs / --dev /dev --proc /proc --tmpfs /tmp --bind '$REPO' /src --chdir /src --setenv HOME /root --setenv DEBIAN_FRONTEND noninteractive --setenv APPIMAGE_EXTRACT_AND_RUN 1 --setenv PATH /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+   ```
+
+3. Install the build tools, Rust (through rustup) and `cargo-packager` inside the image (once):
+
+   ```
+   $IN apt-get update
+   $IN apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config file squashfs-tools xz-utils patchelf desktop-file-utils libfuse2 wget git
+   $IN bash -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal'
+   $IN cargo install cargo-packager --locked
+   ```
+
+   `APPIMAGE_EXTRACT_AND_RUN=1` lets the AppImage tools that `cargo-packager` downloads run without FUSE,
+   which the image does not have.
+
+4. Build and package:
+
+   ```
+   $IN cargo build --release
+   $IN cargo packager --release --formats appimage
+   cp $REPO/target/release/pawchive-downloader_0.1.0_x86_64.AppImage $WORK/pawchive-downloader-0.1.0-x86_64.AppImage
+   cd $WORK && sha256sum pawchive-downloader-0.1.0-x86_64.AppImage > pawchive-downloader-0.1.0-x86_64.AppImage.sha256
+   ```
+
+   The packager settings are in `crates/pawchive-gui/Cargo.toml` (`[package.metadata.packager]`); the icons
+   and the desktop-entry template are in `crates/pawchive-gui/assets/`.
+
+5. Check the result:
+
+   ```
+   objdump -T $REPO/target/release/pawchive-downloader | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1   # GLIBC_2.35
+   $WORK/pawchive-downloader-0.1.0-x86_64.AppImage --appimage-extract     # unpacks to ./squashfs-root
+   find squashfs-root -name '*.so*'                                         # nothing is bundled
+   ```
+
+   Nothing is bundled on purpose: the graphics stack (`libGL`, `libEGL`, `libvulkan`, `libwayland-*`,
+   `libxkbcommon`, `libX11`) is loaded at run time from the host, so the host's own GPU driver is used.
+
 ## Development
 
 F12 saves a screenshot of the window as `pawchive-screenshot-<unix time>.png` in the current directory
