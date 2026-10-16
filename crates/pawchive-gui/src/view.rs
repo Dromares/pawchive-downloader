@@ -15,7 +15,7 @@ use pawchive_core::names::{creator_dir, post_dir};
 
 use crate::app::{Action, App, Filter, ReadyRow, Tab};
 use crate::derive::{self, TYPE_ROWS};
-use crate::format::{clock, comma, eta, hms_utc, human_size, last_component};
+use crate::format::{clock, comma, eta, hms_utc, human_size, last_component, post_label};
 use crate::state::{explain_failure, explain_scan_error, Level, Phase, Row, RowState, Sizing};
 use crate::theme::*;
 use crate::widgets::{bar, card, dim, heading, indeterminate, num, primary, readout, secondary, Cols};
@@ -1153,7 +1153,8 @@ fn ready_row(ui: &mut Ui, p: &Pal, cols: &Cols, r: &ReadyRow, _zebra: bool) {
 fn put_post(ui: &mut Ui, p: &Pal, cols: &Cols, post: &str) {
     if cols.rect().width() >= 620.0 {
         cols.put(ui, 2, false, |ui| {
-            ui.add(egui::Label::new(dim(p, post)).truncate());
+            // The tooltip is the full folder name; the cell reads "date · title".
+            ui.add(egui::Label::new(dim(p, post_label(post))).truncate()).on_hover_text(post);
         });
     }
 }

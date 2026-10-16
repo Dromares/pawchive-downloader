@@ -60,9 +60,33 @@ pub fn last_component(path: &str) -> &str {
     path.trim_end_matches('/').rsplit('/').next().unwrap_or(path)
 }
 
+/// "2026-07-10_122215_暑がりブラ" -> "2026-07-10 · 暑がりブラ": the Post column shows date and title,
+/// not the numeric post id. A name that is not `{date}_{id}_{title}` comes back unchanged, and a
+/// folder with no title gives the date alone.
+pub fn post_label(folder: &str) -> String {
+    let mut parts = folder.splitn(3, '_');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(date), Some(id), title) if !date.is_empty() && !id.is_empty() => match title.map(str::trim) {
+            Some(t) if !t.is_empty() => format!("{date} · {t}"),
+            _ => date.to_string(),
+        },
+        _ => folder.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn post_labels() {
+        assert_eq!(post_label("2026-07-10_122215_暑がりブラ"), "2026-07-10 · 暑がりブラ");
+        assert_eq!(post_label("2026-07-10_122215_a_b"), "2026-07-10 · a_b");
+        assert_eq!(post_label("2026-07-10_122215_"), "2026-07-10");
+        assert_eq!(post_label("undated_7_t"), "undated · t");
+        assert_eq!(post_label("loose"), "loose");
+        assert_eq!(post_label(""), "");
+    }
 
     #[test]
     fn sizes() {
