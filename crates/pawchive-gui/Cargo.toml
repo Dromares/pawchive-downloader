@@ -5,8 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-eframe = "0.37.0"
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 pawchive-core = { version = "0.1.0", path = "../pawchive-core" }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
-tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "sync", "time"] }
