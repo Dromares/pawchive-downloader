@@ -155,6 +155,45 @@ fn scan_size_and_download_end_to_end() {
     assert_eq!(mock.count(), before);
 }
 
+/// Every file path answers 404 (the real creator 1386751 case, DAN-1540 D1).
+async fn gone_site() -> common::Mock {
+    let page = fixture("fanbox-user-119251-posts.json");
+    serve(move |req, _| {
+        if req.path.starts_with("/api/v1/fanbox/user/119251?o=0") {
+            return Resp::ok(&page);
+        }
+        if req.path.starts_with("/api/") {
+            return Resp::ok(b"[]");
+        }
+        Resp::status(404)
+    })
+    .await
+}
+
+#[test]
+fn files_that_404_when_sized_are_not_offered_for_download() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mock = rt.block_on(gone_site());
+    let (handle, rx) = start(&mock.base);
+    handle.send(Command::Scan { url: "https://pawchive.pw/fanbox/user/119251".into() });
+    wait_for(&rx, |e| matches!(e, UiEvent::ScanFinished { .. }).then_some(()));
+    wait_for(&rx, |e| matches!(e, UiEvent::SizingFinished { skipped: false }).then_some(()));
+
+    let out = TempDir::new().unwrap();
+    handle.send(Command::StartDownload {
+        selection: Selection { categories: Category::ALL.into_iter().collect(), include_preview: false },
+        custom_extensions: String::new(),
+        output: out.path().to_path_buf(),
+    });
+    // Files the server said are gone must not become download jobs: nothing is started at all.
+    let started = wait_for(&rx, |e| match e {
+        UiEvent::DownloadStarted { jobs } => Some(jobs.len()),
+        UiEvent::DownloadFinished(_) => Some(0),
+        _ => None,
+    });
+    assert_eq!(started, 0, "404'd files were queued for download");
+}
+
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut v = vec![];
     for e in std::fs::read_dir(dir).unwrap() {
