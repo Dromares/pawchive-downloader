@@ -163,7 +163,12 @@ pub async fn serve(handler: impl Fn(&Req, usize) -> Resp + Send + Sync + 'static
 
 /// Serve `body` at any path honouring `Range: bytes=N-` (206) like the real file host.
 pub fn range_aware(body: Vec<u8>) -> impl Fn(&Req, usize) -> Resp + Send + Sync + 'static {
-    move |req, _| match req.range().and_then(|r| r.strip_prefix("bytes=")).and_then(|r| r.strip_suffix('-')).and_then(|n| n.parse::<usize>().ok()) {
+    move |req, _| match req
+        .range()
+        .and_then(|r| r.strip_prefix("bytes="))
+        .and_then(|r| r.strip_suffix('-'))
+        .and_then(|n| n.parse::<usize>().ok())
+    {
         Some(start) if start < body.len() => Resp::partial(&body, start),
         Some(_) => Resp::status(416),
         None => Resp::ok(&body),

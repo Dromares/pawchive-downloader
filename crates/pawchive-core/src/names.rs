@@ -36,7 +36,12 @@ fn truncate_bytes(s: &str, max: usize) -> &str {
 /// Split `name` into `(stem, ".ext")` where the extension is short and alphanumeric.
 fn split_ext(name: &str) -> (&str, &str) {
     match name.rfind('.') {
-        Some(i) if i > 0 && name.len() - i <= 17 && name[i + 1..].chars().all(|c| c.is_ascii_alphanumeric()) && i + 1 < name.len() => {
+        Some(i)
+            if i > 0
+                && name.len() - i <= 17
+                && name[i + 1..].chars().all(|c| c.is_ascii_alphanumeric())
+                && i + 1 < name.len() =>
+        {
             (&name[..i], &name[i..])
         }
         _ => (name, ""),
@@ -106,7 +111,12 @@ pub fn creator_dir(service: &str, creator_id: &str) -> String {
 pub fn post_dir(published: Option<&str>, post_id: &str, title: &str) -> String {
     let date = published
         .and_then(|p| p.get(..10))
-        .filter(|d| d.len() == 10 && d.as_bytes()[4] == b'-' && d.as_bytes()[7] == b'-' && d.chars().all(|c| c.is_ascii_digit() || c == '-'))
+        .filter(|d| {
+            d.len() == 10
+                && d.as_bytes()[4] == b'-'
+                && d.as_bytes()[7] == b'-'
+                && d.chars().all(|c| c.is_ascii_digit() || c == '-')
+        })
         .unwrap_or("undated");
     sanitize_component(&format!("{date}_{post_id}_{}", title.trim()), MAX_COMPONENT_BYTES)
 }
@@ -215,10 +225,7 @@ mod tests {
     #[test]
     fn folder_layout() {
         assert_eq!(creator_dir("fanbox", "1386751"), "fanbox_1386751");
-        assert_eq!(
-            post_dir(Some("2023-03-10T07:25:56"), "5464553", "Ada: Titfuck?"),
-            "2023-03-10_5464553_Ada Titfuck"
-        );
+        assert_eq!(post_dir(Some("2023-03-10T07:25:56"), "5464553", "Ada: Titfuck?"), "2023-03-10_5464553_Ada Titfuck");
         assert_eq!(post_dir(None, "1", "t"), "undated_1_t");
         assert_eq!(post_dir(Some("garbage"), "1", ""), "undated_1_");
         let long = post_dir(Some("2023-03-10T07:25:56"), "5464553", &"題".repeat(200));

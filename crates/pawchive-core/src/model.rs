@@ -24,9 +24,7 @@ impl Service {
         match s.to_ascii_lowercase().as_str() {
             "patreon" => Ok(Service::Patreon),
             "fanbox" => Ok(Service::Fanbox),
-            other => Err(Error::BadUrl(format!(
-                "unsupported service \"{other}\" (Pawchive has patreon and fanbox)"
-            ))),
+            other => Err(Error::BadUrl(format!("unsupported service \"{other}\" (Pawchive has patreon and fanbox)"))),
         }
     }
 }

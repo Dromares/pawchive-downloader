@@ -42,10 +42,8 @@ impl CookieJar {
 
     /// Read a cookies.txt file into memory. Errors never include file contents.
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).map_err(|e| Error::Cookies {
-            path: path.to_path_buf(),
-            msg: e.to_string(),
-        })?;
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Error::Cookies { path: path.to_path_buf(), msg: e.to_string() })?;
         Ok(Self::parse(&text))
     }
 

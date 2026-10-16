@@ -15,14 +15,8 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 6] = [
-        Category::Image,
-        Category::Archive,
-        Category::Text,
-        Category::Video,
-        Category::Other,
-        Category::Custom,
-    ];
+    pub const ALL: [Category; 6] =
+        [Category::Image, Category::Archive, Category::Text, Category::Video, Category::Other, Category::Custom];
 
     pub fn label(self) -> &'static str {
         match self {

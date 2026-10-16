@@ -85,11 +85,8 @@ pub fn plan_downloads(
             name = sanitize_component(&thumb_name(&name), MAX_COMPONENT_BYTES);
         }
         let name = alloc.allocate(&name);
-        let selected = if f.preview_only {
-            sel.include_preview
-        } else {
-            sel.categories.contains(&category_of(f, custom))
-        };
+        let selected =
+            if f.preview_only { sel.include_preview } else { sel.categories.contains(&category_of(f, custom)) };
         if !selected {
             continue;
         }

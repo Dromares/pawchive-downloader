@@ -260,7 +260,12 @@ mod tests {
         assert_eq!((m.rows[0].done, m.rows[0].total), (50, Some(100)));
         m.apply(UiEvent::Download(Event::Done { id: 0, bytes: 100 }));
         m.apply(UiEvent::Download(Event::Skipped { id: 1 }));
-        m.apply(UiEvent::Download(Event::Retrying { id: 2, attempt: 1, wait: Duration::from_secs(2), reason: "HTTP 429".into() }));
+        m.apply(UiEvent::Download(Event::Retrying {
+            id: 2,
+            attempt: 1,
+            wait: Duration::from_secs(2),
+            reason: "HTTP 429".into(),
+        }));
         assert!(matches!(m.rows[2].state, RowState::Retrying(_)));
         m.apply(UiEvent::Download(Event::Progress { id: 2, done: 1, total: None }));
         assert_eq!(m.rows[2].state, RowState::Active, "progress after a retry means it is running again");
@@ -294,17 +299,27 @@ mod tests {
     fn file_sized_updates_the_list_and_bumps_the_version() {
         let mut m = Model::default();
         let f = |p: &str| FileEntry {
-            post_id: "1".into(), post_title: "t".into(), post_published: None, name: p.into(), path: format!("/{p}"),
-            preview_only: false, node: None, size: None, content_type: None,
+            post_id: "1".into(),
+            post_title: "t".into(),
+            post_published: None,
+            name: p.into(),
+            path: format!("/{p}"),
+            preview_only: false,
+            node: None,
+            size: None,
+            content_type: None,
         };
         m.apply(UiEvent::ScanFinished {
-            creator: CreatorRef { service: Service::Fanbox, id: "1".into() }, posts: 1, files: vec![f("a.jpg"), f("b.jpg")],
+            creator: CreatorRef { service: Service::Fanbox, id: "1".into() },
+            posts: 1,
+            files: vec![f("a.jpg"), f("b.jpg")],
         });
         let v = m.files_version;
         m.apply(UiEvent::FileSized { index: 1, size: Some(10), content_type: Some("image/jpeg".into()) });
         assert_eq!(m.files[1].size, Some(10));
         assert!(m.files_version > v);
-        m.apply(UiEvent::FileSized { index: 99, size: None, content_type: None }); // out of range: ignored
+        m.apply(UiEvent::FileSized { index: 99, size: None, content_type: None });
+        // out of range: ignored
     }
 
     #[test]

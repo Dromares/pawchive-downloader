@@ -16,11 +16,7 @@ pub fn parse_creator_url(input: &str) -> Result<CreatorRef> {
     if input.is_empty() {
         return Err(Error::BadUrl("paste a Pawchive creator URL first".into()));
     }
-    let with_scheme = if input.contains("://") {
-        input.to_string()
-    } else {
-        format!("https://{input}")
-    };
+    let with_scheme = if input.contains("://") { input.to_string() } else { format!("https://{input}") };
     let url = Url::parse(&with_scheme).map_err(|_| Error::BadUrl(format!("\"{input}\" is not a valid URL")))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(Error::BadUrl("only http(s) URLs are supported".into()));
@@ -40,9 +36,7 @@ pub fn parse_creator_url(input: &str) -> Result<CreatorRef> {
             }
             Ok(CreatorRef { service, id: (*id).to_string() })
         }
-        _ => Err(Error::BadUrl(
-            "expected a creator URL like https://pawchive.pw/fanbox/user/1386751".into(),
-        )),
+        _ => Err(Error::BadUrl("expected a creator URL like https://pawchive.pw/fanbox/user/1386751".into())),
     }
 }
 

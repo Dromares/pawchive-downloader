@@ -29,10 +29,7 @@ impl Gate {
         Gate {
             inner: Arc::new(Inner {
                 interval,
-                state: Mutex::new(State {
-                    next_slot: Instant::now(),
-                    paused_until: None,
-                }),
+                state: Mutex::new(State { next_slot: Instant::now(), paused_until: None }),
             }),
         }
     }

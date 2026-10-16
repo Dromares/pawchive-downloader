@@ -127,7 +127,10 @@ pub async fn send_with_retry(
                     }
                     Verdict::BotBlock => {
                         gate.pause_for(policy.forbidden_pause);
-                        (format!("HTTP 403 (bot page), pausing all requests {}s", policy.forbidden_pause.as_secs()), Duration::ZERO)
+                        (
+                            format!("HTTP 403 (bot page), pausing all requests {}s", policy.forbidden_pause.as_secs()),
+                            Duration::ZERO,
+                        )
                     }
                     Verdict::Retry => {
                         let ra = retry_after(resp.headers());
@@ -164,7 +167,17 @@ mod tests {
     #[test]
     fn status_verdicts() {
         use Verdict::*;
-        for (code, v) in [(200, Ok), (206, Ok), (403, BotBlock), (404, Permanent), (410, Permanent), (429, Retry), (500, Retry), (503, Retry), (400, Permanent)] {
+        for (code, v) in [
+            (200, Ok),
+            (206, Ok),
+            (403, BotBlock),
+            (404, Permanent),
+            (410, Permanent),
+            (429, Retry),
+            (500, Retry),
+            (503, Retry),
+            (400, Permanent),
+        ] {
             assert_eq!(classify_status(StatusCode::from_u16(code).unwrap()), v, "{code}");
         }
     }

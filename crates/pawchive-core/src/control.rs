@@ -25,9 +25,7 @@ impl Default for Control {
 
 impl Control {
     pub fn new() -> Self {
-        Control {
-            tx: Arc::new(watch::channel(RunState::Running).0),
-        }
+        Control { tx: Arc::new(watch::channel(RunState::Running).0) }
     }
 
     pub fn state(&self) -> RunState {

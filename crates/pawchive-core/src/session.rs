@@ -25,11 +25,17 @@ use crate::settings::Settings;
 
 #[derive(Clone, Debug)]
 pub enum Command {
-    Scan { url: String },
+    Scan {
+        url: String,
+    },
     SetSettings(Settings),
     /// Stop the background size probing (downloads work without sizes).
     SkipSizing,
-    StartDownload { selection: Selection, custom_extensions: String, output: PathBuf },
+    StartDownload {
+        selection: Selection,
+        custom_extensions: String,
+        output: PathBuf,
+    },
     Pause,
     Resume,
     /// Cancels the running download, or the running scan. `.part` files are kept for resume.
@@ -355,7 +361,9 @@ impl Session {
                         break;
                     }
                     Err(e) => {
-                        let _ = ev.send(UiEvent::Log(format!("Could not size a file ({e}); it will be sized when downloaded")));
+                        let _ = ev.send(UiEvent::Log(format!(
+                            "Could not size a file ({e}); it will be sized when downloaded"
+                        )));
                         notify();
                     }
                 }
@@ -386,7 +394,10 @@ impl Session {
         self.last_jobs = jobs.clone();
         self.failed.clear();
         self.emit(UiEvent::DownloadStarted {
-            jobs: jobs.iter().map(|j| JobInfo { id: j.id, label: j.label.clone(), expected_size: j.expected_size }).collect(),
+            jobs: jobs
+                .iter()
+                .map(|j| JobInfo { id: j.id, label: j.label.clone(), expected_size: j.expected_size })
+                .collect(),
         });
         self.run_jobs(jobs);
     }
@@ -395,16 +406,19 @@ impl Session {
         let Some(client) = self.client.clone() else { return };
         let control = Control::new();
         self.download = Some(control.clone());
-        let engine = Engine::new(client.http.clone(), client.gate.clone(), EngineConfig {
-            concurrency: self.settings.concurrency,
-            retry: self.tuning.retry.clone(),
-        });
+        let engine = Engine::new(
+            client.http.clone(),
+            client.gate.clone(),
+            EngineConfig { concurrency: self.settings.concurrency, retry: self.tuning.retry.clone() },
+        );
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let tx2 = tx.clone();
-            let summary = engine.run(jobs, control, move |e| {
-                let _ = tx2.send(Msg::Dl(e));
-            }).await;
+            let summary = engine
+                .run(jobs, control, move |e| {
+                    let _ = tx2.send(Msg::Dl(e));
+                })
+                .await;
             let _ = tx.send(Msg::DlDone(summary));
         });
     }

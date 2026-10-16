@@ -98,7 +98,11 @@ async fn scan_pages_by_offset_and_stops_on_the_empty_array() {
     let paths: Vec<_> = m.hits().into_iter().map(|h| h.req.path).collect();
     assert_eq!(
         paths,
-        ["/api/v1/patreon/user/30500811?o=0", "/api/v1/patreon/user/30500811?o=50", "/api/v1/patreon/user/30500811?o=100"],
+        [
+            "/api/v1/patreon/user/30500811?o=0",
+            "/api/v1/patreon/user/30500811?o=50",
+            "/api/v1/patreon/user/30500811?o=100"
+        ],
         "two full pages, then one request that returns []"
     );
     assert_eq!(progress.len(), 2);
@@ -164,7 +168,10 @@ fn dedupe_keeps_first_occurrence_order() {
     )
     .unwrap();
     let f = p.files();
-    assert_eq!(f.iter().map(|f| (f.name.as_str(), f.path.as_str())).collect::<Vec<_>>(), [("main.jpg", "/a/a.jpg"), ("x.jpg", "/b/b.jpg"), ("y", "/c/c")]);
+    assert_eq!(
+        f.iter().map(|f| (f.name.as_str(), f.path.as_str())).collect::<Vec<_>>(),
+        [("main.jpg", "/a/a.jpg"), ("x.jpg", "/b/b.jpg"), ("y", "/c/c")]
+    );
 }
 
 #[test]
@@ -176,7 +183,11 @@ fn preview_only_counts_match_the_raw_json() {
             .iter()
             .map(|p| {
                 let mut seen = HashSet::new();
-                raw_entries(p).into_iter().filter(|e| seen.insert(e["path"].as_str().unwrap())).filter(|e| e["preview_only"] == Value::Bool(true)).count()
+                raw_entries(p)
+                    .into_iter()
+                    .filter(|e| seen.insert(e["path"].as_str().unwrap()))
+                    .filter(|e| e["preview_only"] == Value::Bool(true))
+                    .count()
             })
             .sum();
         let got_true = parsed.iter().flat_map(|p| p.files()).filter(|f| f.preview_only).count();
@@ -189,8 +200,12 @@ fn preview_only_counts_match_the_raw_json() {
 fn fanbox_files_have_no_preview_flag_and_are_all_downloadable() {
     for name in [F_BIG, F_SMALL, F_SMALL_POST] {
         let raw = posts_of(name);
-        assert!(raw.iter().flat_map(raw_entries).all(|e| e.get("preview_only").is_none()), "{name}: fixture assumption");
-        let files: Vec<_> = parse_posts(&serde_json::to_vec(&raw).unwrap()).unwrap().iter().flat_map(|p| p.files()).collect();
+        assert!(
+            raw.iter().flat_map(raw_entries).all(|e| e.get("preview_only").is_none()),
+            "{name}: fixture assumption"
+        );
+        let files: Vec<_> =
+            parse_posts(&serde_json::to_vec(&raw).unwrap()).unwrap().iter().flat_map(|p| p.files()).collect();
         assert!(!files.is_empty());
         assert!(files.iter().all(|f| !f.preview_only && f.node.is_none()), "{name}");
     }
@@ -210,7 +225,10 @@ fn the_node_field_is_tolerated_and_captured_where_present() {
     for (path, node) in &want {
         assert_eq!(files[path], Some(*node), "{path}");
     }
-    assert_eq!(files.values().filter(|n| n.is_some()).count(), want.iter().map(|(p, _)| p).collect::<HashSet<_>>().len());
+    assert_eq!(
+        files.values().filter(|n| n.is_some()).count(),
+        want.iter().map(|(p, _)| p).collect::<HashSet<_>>().len()
+    );
 }
 
 #[test]
@@ -239,7 +257,10 @@ fn post_detail_bodies_parse_like_list_items() {
 
 #[test]
 fn tolerates_nulls_numeric_ids_and_unknown_fields() {
-    let p = parse_post(br#"{"id":123,"title":null,"attachments":null,"file":null,"brand_new_field":{"x":1},"published":null}"#).unwrap();
+    let p = parse_post(
+        br#"{"id":123,"title":null,"attachments":null,"file":null,"brand_new_field":{"x":1},"published":null}"#,
+    )
+    .unwrap();
     assert_eq!((p.id.as_str(), p.title.as_str()), ("123", ""));
     assert!(p.files().is_empty());
     let p = parse_post(br#"{"id":"1","file":{},"attachments":[{"path":"/a/b.png"}]}"#).unwrap();
@@ -271,8 +292,14 @@ fn summary_separates_preview_only_files_from_downloadable_ones() {
     let downloadable: usize = s.per_category.values().map(|c| c.count).sum();
     assert_eq!(downloadable + want_preview, files.len());
     // on this creator every downloadable file is a zip
-    assert_eq!(s.per_category[&Category::Archive].count, files.iter().filter(|f| !f.preview_only && ext(&f.name) == "zip").count());
-    assert!(!s.per_category.contains_key(&Category::Image), "preview-only images must not be counted as downloadable images");
+    assert_eq!(
+        s.per_category[&Category::Archive].count,
+        files.iter().filter(|f| !f.preview_only && ext(&f.name) == "zip").count()
+    );
+    assert!(
+        !s.per_category.contains_key(&Category::Image),
+        "preview-only images must not be counted as downloadable images"
+    );
     // sizes are unknown until probed
     assert_eq!(s.per_category[&Category::Archive].unsized_files, s.per_category[&Category::Archive].count);
 }
@@ -285,7 +312,10 @@ fn custom_extensions_move_files_into_their_own_row() {
     let pngs = files.iter().filter(|f| ext(&f.name) == "png").count();
     assert!(pngs > 0);
     assert_eq!(custom.per_category[&Category::Custom].count, pngs);
-    assert_eq!(plain.per_category[&Category::Image].count - custom.per_category.get(&Category::Image).map_or(0, |c| c.count), pngs);
+    assert_eq!(
+        plain.per_category[&Category::Image].count - custom.per_category.get(&Category::Image).map_or(0, |c| c.count),
+        pngs
+    );
 }
 
 fn creator(service: Service, id: &str) -> CreatorRef {
@@ -297,7 +327,14 @@ fn plan_places_files_in_sanitised_collision_free_post_folders() {
     let files = all_files(&[F_BIG, F_SMALL]);
     let sel = Selection { categories: Category::ALL.into_iter().collect(), include_preview: false };
     let out = Path::new("/out");
-    let jobs = plan_downloads(&creator(Service::Fanbox, "1386751"), &files, &sel, &CustomExts::default(), out, &Hosts::default());
+    let jobs = plan_downloads(
+        &creator(Service::Fanbox, "1386751"),
+        &files,
+        &sel,
+        &CustomExts::default(),
+        out,
+        &Hosts::default(),
+    );
     assert_eq!(jobs.len(), files.len(), "everything is downloadable on fanbox");
     let mut dests = HashSet::new();
     for j in &jobs {
@@ -322,12 +359,22 @@ fn preview_only_files_are_skipped_by_default_and_saved_as_thumbs_when_ticked() {
     assert_eq!(without.len(), files.len() - want_preview);
     assert!(without.iter().all(|j| j.url.starts_with("https://file.pawchive.pw/")));
 
-    let with = plan_downloads(&c, &files, &Selection { include_preview: true, ..base.clone() }, &CustomExts::default(), Path::new("/o"), &Hosts::default());
+    let with = plan_downloads(
+        &c,
+        &files,
+        &Selection { include_preview: true, ..base.clone() },
+        &CustomExts::default(),
+        Path::new("/o"),
+        &Hosts::default(),
+    );
     assert_eq!(with.len(), files.len());
     let thumbs: Vec<_> = with.iter().filter(|j| j.url.contains("/thumbnail/")).collect();
     assert_eq!(thumbs.len(), want_preview);
     assert!(thumbs.iter().all(|j| j.url.starts_with("https://img.pawchive.pw/thumbnail/data/")));
-    assert!(thumbs.iter().all(|j| j.dest.file_name().unwrap().to_string_lossy().contains(".thumb")), "thumbnails can never be mistaken for originals");
+    assert!(
+        thumbs.iter().all(|j| j.dest.file_name().unwrap().to_string_lossy().contains(".thumb")),
+        "thumbnails can never be mistaken for originals"
+    );
     assert!(thumbs.iter().all(|j| j.expected_size.is_none()));
     // ticking the preview row only adds files; the originals keep the same names
     let full_dests: HashSet<_> = without.iter().map(|j| &j.dest).collect();
@@ -342,7 +389,8 @@ fn only_selected_categories_are_planned() {
     let jobs = plan_downloads(&c, &files, &only_zip, &CustomExts::default(), Path::new("/o"), &Hosts::default());
     assert!(!jobs.is_empty());
     assert!(jobs.iter().all(|j| j.dest.extension().is_some_and(|e| e == "zip")));
-    let none = plan_downloads(&c, &files, &Selection::default(), &CustomExts::default(), Path::new("/o"), &Hosts::default());
+    let none =
+        plan_downloads(&c, &files, &Selection::default(), &CustomExts::default(), Path::new("/o"), &Hosts::default());
     assert!(none.is_empty());
 }
 
@@ -351,7 +399,14 @@ fn planned_sizes_come_from_probes_for_full_files_only() {
     let mut files = all_files(&[F_SMALL]);
     files[0].apply_probe(Some(1234), Some("image/jpeg".into()));
     let sel = Selection { categories: Category::ALL.into_iter().collect(), include_preview: false };
-    let jobs = plan_downloads(&creator(Service::Fanbox, "119251"), &files, &sel, &CustomExts::default(), Path::new("/o"), &Hosts::default());
+    let jobs = plan_downloads(
+        &creator(Service::Fanbox, "119251"),
+        &files,
+        &sel,
+        &CustomExts::default(),
+        Path::new("/o"),
+        &Hosts::default(),
+    );
     assert_eq!(jobs[0].expected_size, Some(1234));
     assert!(jobs[1..].iter().all(|j| j.expected_size.is_none()));
 }
@@ -365,7 +420,14 @@ fn colliding_names_within_a_post_get_numbered() {
     )
     .unwrap();
     let sel = Selection { categories: Category::ALL.into_iter().collect(), include_preview: false };
-    let jobs = plan_downloads(&creator(Service::Patreon, "1"), &p.files(), &sel, &CustomExts::default(), Path::new("/o"), &Hosts::default());
+    let jobs = plan_downloads(
+        &creator(Service::Patreon, "1"),
+        &p.files(),
+        &sel,
+        &CustomExts::default(),
+        Path::new("/o"),
+        &Hosts::default(),
+    );
     let names: Vec<_> = jobs.iter().map(|j| j.dest.file_name().unwrap().to_string_lossy().to_string()).collect();
     assert_eq!(names, ["pic.jpg", "pic (2).jpg", "PIC (3).jpg"]);
     assert_eq!(jobs[0].dest.parent().unwrap().file_name().unwrap(), "2024-01-02_9_t");

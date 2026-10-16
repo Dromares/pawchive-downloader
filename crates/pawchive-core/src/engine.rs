@@ -33,15 +33,39 @@ pub struct Job {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    Started { id: u64 },
-    Progress { id: u64, done: u64, total: Option<u64> },
-    Retrying { id: u64, attempt: u32, wait: Duration, reason: String },
+    Started {
+        id: u64,
+    },
+    Progress {
+        id: u64,
+        done: u64,
+        total: Option<u64>,
+    },
+    Retrying {
+        id: u64,
+        attempt: u32,
+        wait: Duration,
+        reason: String,
+    },
     /// A 403 bot page: every request (all jobs) is paused for this long.
-    GlobalPause { secs: u64 },
-    Skipped { id: u64 },
-    Done { id: u64, bytes: u64 },
-    Failed { id: u64, error: String, permanent: bool },
-    Cancelled { id: u64 },
+    GlobalPause {
+        secs: u64,
+    },
+    Skipped {
+        id: u64,
+    },
+    Done {
+        id: u64,
+        bytes: u64,
+    },
+    Failed {
+        id: u64,
+        error: String,
+        permanent: bool,
+    },
+    Cancelled {
+        id: u64,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -84,11 +108,18 @@ enum Outcome {
 /// Result of one HTTP attempt.
 enum Step {
     Done(u64),
-    Fail { error: String, permanent: bool },
+    Fail {
+        error: String,
+        permanent: bool,
+    },
     Cancelled,
     /// Paused mid-transfer; the connection was dropped and the `.part` file kept.
     Paused,
-    Retry { reason: String, retry_after: Option<Duration>, bot_block: bool },
+    Retry {
+        reason: String,
+        retry_after: Option<Duration>,
+        bot_block: bool,
+    },
 }
 
 fn part_path(dest: &Path) -> PathBuf {
@@ -111,7 +142,8 @@ impl Engine {
         let tally = Arc::new(Mutex::new(Summary::default()));
         let mut workers = JoinSet::new();
         for _ in 0..self.cfg.concurrency {
-            let (eng, queue, tally, control, emit) = (self.clone(), queue.clone(), tally.clone(), control.clone(), emit.clone());
+            let (eng, queue, tally, control, emit) =
+                (self.clone(), queue.clone(), tally.clone(), control.clone(), emit.clone());
             workers.spawn(async move {
                 loop {
                     // Pause stops new starts; cancel stops everything.
@@ -176,7 +208,10 @@ impl Engine {
                 Step::Retry { reason, retry_after, bot_block } => {
                     attempt += 1;
                     if attempt >= policy.max_tries {
-                        return Outcome::Failed { error: format!("gave up after {attempt} tries: {reason}"), permanent: false };
+                        return Outcome::Failed {
+                            error: format!("gave up after {attempt} tries: {reason}"),
+                            permanent: false,
+                        };
                     }
                     // After a bot page the global gate is already paused; no extra per-file wait.
                     let wait = if bot_block { Duration::ZERO } else { policy.backoff(attempt, retry_after) };
@@ -224,7 +259,8 @@ impl Engine {
             200 => (0, resp.content_length()),
             206 => {
                 let range = resp.headers().get(CONTENT_RANGE).and_then(|v| v.to_str().ok()).unwrap_or("");
-                let start: Option<u64> = range.strip_prefix("bytes ").and_then(|r| r.split('-').next()).and_then(|s| s.parse().ok());
+                let start: Option<u64> =
+                    range.strip_prefix("bytes ").and_then(|r| r.split('-').next()).and_then(|s| s.parse().ok());
                 if start != Some(existing) {
                     let _ = fs::remove_file(part).await;
                     return retry("server returned a different range; restarting".into(), None);
@@ -234,11 +270,8 @@ impl Engine {
             other => return Step::Fail { error: format!("HTTP {other}"), permanent: true },
         };
         // 200 means the whole body: a server that ignored our Range restarts the file cleanly.
-        let file = if start > 0 {
-            fs::OpenOptions::new().append(true).open(part).await
-        } else {
-            fs::File::create(part).await
-        };
+        let file =
+            if start > 0 { fs::OpenOptions::new().append(true).open(part).await } else { fs::File::create(part).await };
         let mut file = match file {
             Ok(f) => f,
             Err(e) => return Step::Fail { error: format!("cannot write {}: {e}", part.display()), permanent: true },

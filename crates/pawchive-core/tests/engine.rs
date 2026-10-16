@@ -202,7 +202,12 @@ async fn backs_off_on_429_honouring_retry_after() {
 
 #[tokio::test]
 async fn a_404_is_a_permanent_failure_with_no_retries() {
-    let m = serve(|_, _| Resp::status(404).header("Content-Type", "application/octet-stream").tap(|r| r.body = br#"{"error":"File not found"}"#.to_vec())).await;
+    let m = serve(|_, _| {
+        Resp::status(404)
+            .header("Content-Type", "application/octet-stream")
+            .tap(|r| r.body = br#"{"error":"File not found"}"#.to_vec())
+    })
+    .await;
     let dir = TempDir::new().unwrap();
     let j = job(0, m.url("/gone"), &dir, "g.bin", None);
     let dest = j.dest.clone();
@@ -363,7 +368,11 @@ async fn cancel_keeps_the_part_file_and_counts_unstarted_jobs() {
     let d2 = data.clone();
     let m = serve(move |_, _| Resp::ok(&d2[..2_000]).truncated(10_000).stalled(Duration::from_secs(10))).await;
     let dir = TempDir::new().unwrap();
-    let jobs = vec![job(0, m.url("/a"), &dir, "x0.bin", None), job(1, m.url("/b"), &dir, "x1.bin", None), job(2, m.url("/c"), &dir, "x2.bin", None)];
+    let jobs = vec![
+        job(0, m.url("/a"), &dir, "x0.bin", None),
+        job(1, m.url("/b"), &dir, "x1.bin", None),
+        job(2, m.url("/c"), &dir, "x2.bin", None),
+    ];
     let control = Control::new();
     let e = engine(1, policy());
     let c2 = control.clone();

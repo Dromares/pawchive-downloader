@@ -54,7 +54,10 @@ async fn mock_site() -> common::Mock {
         let body = file_body(&req.path);
         let ct = if req.path.ends_with(".png") { "image/png" } else { "image/jpeg" };
         match req.range() {
-            Some("bytes=0-0") => Resp::status(206).header("Content-Range", &format!("bytes 0-0/{}", body.len())).header("Content-Type", ct).tap_body(vec![body[0]]),
+            Some("bytes=0-0") => Resp::status(206)
+                .header("Content-Range", &format!("bytes 0-0/{}", body.len()))
+                .header("Content-Type", ct)
+                .tap_body(vec![body[0]]),
             _ => Resp::ok(&body).header("Content-Type", ct),
         }
     })

@@ -65,6 +65,7 @@ impl App {
             started: Instant::now(),
             shot_done: false,
         };
+        app.settings_open = dev::open_settings();
         if let Some(url) = dev::autoscan_url() {
             app.url = url.clone();
             app.handle.send(Command::Scan { url });
@@ -74,6 +75,12 @@ impl App {
 
     fn drain(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
+            if matches!(ev, UiEvent::ScanFinished { .. }) {
+                if let Some(dir) = dev::autodownload_dir() {
+                    self.output = dir;
+                    self.start_download();
+                }
+            }
             self.model.apply(ev);
         }
         while let Ok(note) = self.note_rx.try_recv() {
@@ -138,7 +145,7 @@ impl App {
             ui.heading("Pawchive Downloader");
             ui.label(RichText::new(format!("v{}", pawchive_core::VERSION)).weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("⚙ Settings").clicked() {
+                if ui.button("Settings").clicked() {
                     self.draft = self.settings.clone();
                     self.settings_open = true;
                 }
@@ -206,12 +213,12 @@ impl App {
             egui::Grid::new("types").num_columns(3).striped(true).spacing([18.0, 4.0]).show(ui, |ui| {
                 for cat in Category::ALL {
                     let stat = summary.per_category.get(&cat);
-                    if cat == Category::Custom && stat.is_none() && self.custom_ext.trim().is_empty() {
-                        continue;
-                    }
                     let count = stat.map_or(0, |s| s.count);
+                    if count == 0 {
+                        continue; // only show types this creator actually has
+                    }
                     let mut on = self.checked.contains(&cat);
-                    if ui.add_enabled(count > 0, egui::Checkbox::new(&mut on, cat.label())).changed() {
+                    if ui.checkbox(&mut on, cat.label()).changed() {
                         if on {
                             self.checked.insert(cat);
                         } else {
@@ -251,7 +258,9 @@ impl App {
             Sizing::Running { done, total } => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(format!("Sizing files in the background ({done}/{total}); downloading works without sizes."));
+                    ui.label(format!(
+                        "Sizing files in the background ({done}/{total}); downloading works without sizes."
+                    ));
                     if ui.button("Skip sizing").clicked() {
                         self.handle.send(Command::SkipSizing);
                     }
@@ -269,14 +278,20 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_enabled(
                 !self.model.busy(),
-                egui::TextEdit::singleline(&mut self.output).hint_text("/path/to/folder").desired_width(ui.available_width() - 100.0),
+                egui::TextEdit::singleline(&mut self.output)
+                    .hint_text("/path/to/folder")
+                    .desired_width(ui.available_width() - 100.0),
             );
             if ui.add_enabled(!self.model.busy(), egui::Button::new("Browse…")).clicked() {
                 self.pick(&ui.ctx().clone(), Picker::Output);
             }
         });
         if !self.output.trim().is_empty() {
-            ui.label(RichText::new(format!("Files go to {}/<service>_<creator>/<date>_<post>_<title>/", self.output.trim())).small().weak());
+            ui.label(
+                RichText::new(format!("Files go to {}/<service>_<creator>/<date>_<post>_<title>/", self.output.trim()))
+                    .small()
+                    .weak(),
+            );
         }
     }
 
@@ -346,10 +361,16 @@ impl App {
                             RowState::Retrying(why) => (format!("retrying ({why})"), Color32::from_rgb(230, 170, 60)),
                             RowState::Done => ("done".into(), Color32::from_rgb(110, 200, 120)),
                             RowState::Skipped => ("skipped (exists)".into(), Color32::GRAY),
-                            RowState::Failed { error, .. } => (format!("failed: {error}"), Color32::from_rgb(220, 90, 90)),
+                            RowState::Failed { error, .. } => {
+                                (format!("failed: {error}"), Color32::from_rgb(220, 90, 90))
+                            }
                             RowState::Cancelled => ("cancelled".into(), Color32::GRAY),
                         };
-                        ui.add_sized([210.0, row_h], egui::Label::new(RichText::new(text).color(color)).truncate());
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(210.0, row_h),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| ui.add(egui::Label::new(RichText::new(text).color(color)).truncate()),
+                        );
                         ui.add(egui::Label::new(&r.label).truncate());
                     });
                 }
@@ -362,10 +383,16 @@ impl App {
         let failed: Vec<(usize, String, String)> = self
             .model
             .failed_rows()
-            .map(|(i, r)| (i, r.label.clone(), match &r.state {
-                RowState::Failed { error, .. } => error.clone(),
-                _ => String::new(),
-            }))
+            .map(|(i, r)| {
+                (
+                    i,
+                    r.label.clone(),
+                    match &r.state {
+                        RowState::Failed { error, .. } => error.clone(),
+                        _ => String::new(),
+                    },
+                )
+            })
             .collect();
         if !failed.is_empty() {
             ui.horizontal(|ui| {
@@ -381,44 +408,62 @@ impl App {
                 }
             });
         }
-        egui::ScrollArea::vertical().id_salt("log").max_height(130.0).auto_shrink([false, true]).stick_to_bottom(true).show(ui, |ui| {
-            for line in &self.model.log {
-                ui.label(RichText::new(line).small().monospace());
-            }
-        });
+        egui::ScrollArea::vertical()
+            .id_salt("log")
+            .max_height(130.0)
+            .auto_shrink([false, true])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for line in &self.model.log {
+                    ui.label(RichText::new(line).small().monospace());
+                }
+            });
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
         let mut apply = false;
-        egui::Window::new("Settings").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-            egui::Grid::new("settings").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
-                ui.label("Concurrent downloads");
-                ui.add(egui::Slider::new(&mut self.draft.concurrency, 1..=MAX_CONCURRENCY));
-                ui.end_row();
-                ui.label("Minimum delay between requests");
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut self.draft.delay_ms).range(MIN_DELAY_MS..=60_000).suffix(" ms"));
-                    ui.label(RichText::new("the site asks for at most 1 request/second").small().weak());
+        egui::Window::new("Settings").min_width(460.0).open(&mut open).collapsible(false).resizable(false).show(
+            ctx,
+            |ui| {
+                egui::Grid::new("settings").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
+                    ui.label("Concurrent downloads");
+                    ui.add(egui::Slider::new(&mut self.draft.concurrency, 1..=MAX_CONCURRENCY));
+                    ui.end_row();
+                    ui.label("Minimum delay between requests");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.draft.delay_ms).range(MIN_DELAY_MS..=60_000).suffix(" ms"),
+                        );
+                        ui.label(RichText::new("the site asks for at most 1 request/second").small().weak());
+                    });
+                    ui.end_row();
+                    ui.label("Contact (added to the user agent)");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.draft.contact)
+                            .hint_text("you@example.org")
+                            .desired_width(260.0),
+                    );
+                    ui.end_row();
+                    ui.label("Cookie file (optional)");
+                    ui.horizontal(|ui| {
+                        let shown = self
+                            .draft
+                            .cookie_file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "none".into());
+                        ui.label(shown);
+                        if ui.button("Choose…").clicked() {
+                            self.pick(ctx, Picker::CookieFile);
+                        }
+                        if ui.add_enabled(self.draft.cookie_file.is_some(), egui::Button::new("Clear")).clicked() {
+                            self.draft.cookie_file = None;
+                        }
+                    });
+                    ui.end_row();
                 });
-                ui.end_row();
-                ui.label("Contact (added to the user agent)");
-                ui.add(egui::TextEdit::singleline(&mut self.draft.contact).hint_text("you@example.org").desired_width(260.0));
-                ui.end_row();
-                ui.label("Cookie file (optional)");
-                ui.horizontal(|ui| {
-                    let shown = self.draft.cookie_file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "none".into());
-                    ui.label(shown);
-                    if ui.button("Choose…").clicked() {
-                        self.pick(ctx, Picker::CookieFile);
-                    }
-                    if ui.add_enabled(self.draft.cookie_file.is_some(), egui::Button::new("Clear")).clicked() {
-                        self.draft.cookie_file = None;
-                    }
-                });
-                ui.end_row();
-            });
-            ui.label(
+                ui.label(
                 RichText::new(
                     "A Netscape cookies.txt is read into memory only. Its contents are never logged, shown or saved; \
                      only the file path is remembered. Pawchive works without it.",
@@ -426,12 +471,17 @@ impl App {
                 .small()
                 .weak(),
             );
-            ui.label(RichText::new(format!("User agent: {}", self.draft.clone().normalized().user_agent())).small().monospace());
-            ui.add_space(6.0);
-            if ui.button("Apply").clicked() {
-                apply = true;
-            }
-        });
+                ui.label(
+                    RichText::new(format!("User agent: {}", self.draft.clone().normalized().user_agent()))
+                        .small()
+                        .monospace(),
+                );
+                ui.add_space(6.0);
+                if ui.button("Apply").clicked() {
+                    apply = true;
+                }
+            },
+        );
         if apply {
             self.settings = std::mem::take(&mut self.draft).normalized();
             self.save_settings();

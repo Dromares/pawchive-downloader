@@ -31,6 +31,16 @@ pub fn autoscan_url() -> Option<String> {
     debug_env("PAWCHIVE_DEV_AUTOSCAN")
 }
 
+/// Start downloading everything into this directory as soon as a scan finishes. Debug builds only.
+pub fn autodownload_dir() -> Option<String> {
+    debug_env("PAWCHIVE_DEV_AUTODOWNLOAD")
+}
+
+/// Open the settings window at startup. Debug builds only.
+pub fn open_settings() -> bool {
+    debug_env("PAWCHIVE_DEV_OPEN_SETTINGS").is_some()
+}
+
 /// Take a screenshot this many seconds after start. Debug builds only.
 pub fn shot_after_secs() -> Option<f64> {
     debug_env("PAWCHIVE_DEV_SHOT_AFTER_SECS").and_then(|v| v.parse().ok())

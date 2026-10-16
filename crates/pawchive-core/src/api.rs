@@ -100,7 +100,12 @@ impl Client {
             let body = resp.bytes().await.map_err(Error::from_reqwest)?;
             let posts = parse_posts(&body)?;
             if posts.is_empty() {
-                return Ok(ScanResult { creator: creator.clone(), pages: progress.pages, posts: progress.posts, files });
+                return Ok(ScanResult {
+                    creator: creator.clone(),
+                    pages: progress.pages,
+                    posts: progress.posts,
+                    files,
+                });
             }
             // A server that ignores `o` would hand us the same page forever.
             if prev_first.as_deref() == Some(posts[0].id.as_str()) {
