@@ -51,7 +51,7 @@ mock server; they never touch the network.
 ## Building the AppImage
 
 The release AppImage is built inside an Ubuntu 22.04 root filesystem, so the binary only needs glibc
-2.35 (the floor for every distribution newer than Ubuntu 22.04 / Debian 12). Building on a rolling
+2.35, which Ubuntu 22.04 and Debian 12 (and anything newer) provide. Building on a rolling
 distribution would raise that floor. The steps below need no root, no Docker and no `sudo`: only
 `bwrap` (bubblewrap), `unshare`, `curl` and `tar` on the host. Run them from a clone of this repo; `$WORK`
 is any empty directory with about 6 GB free.
