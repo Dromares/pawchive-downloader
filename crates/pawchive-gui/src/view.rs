@@ -168,7 +168,7 @@ impl App {
         let summary = self.summary();
         let editable = phase == Phase::Ready;
         let w = ui.available_width();
-        let widths = vec![112.0, (w - 112.0 - 48.0 - 84.0).max(40.0), 48.0, 84.0];
+        let widths = vec![100.0, (w - 100.0 - 40.0 - 84.0).max(40.0), 40.0, 84.0];
         let probing = self.sizing_running();
         let lower_bound = self.sizes_are_lower_bounds();
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -193,7 +193,7 @@ impl App {
                 ui.add_enabled_ui(editable && has, |ui| changed = ui.checkbox(&mut on, cat.label()).changed());
             });
             c.put(ui, 1, false, |ui| {
-                ui.add(egui::Label::new(dim(p, exts).size(T_SMALL - 0.5)).truncate());
+                ui.add(egui::Label::new(dim(p, exts).size(T_SMALL - 1.5)).truncate());
             });
             c.put(ui, 2, true, |ui| {
                 // The session reports totals while scanning, not types, so counts wait for the end.
@@ -239,7 +239,7 @@ impl App {
         let pc = summary.preview.count;
         let mut pv = self.include_preview && pc > 0;
         let mut changed = false;
-        let c = Cols::new(ui, ROW_H + 2.0, vec![w - 48.0 - 84.0, 48.0, 84.0]);
+        let c = Cols::new(ui, ROW_H + 2.0, vec![w - 40.0 - 84.0, 40.0, 84.0]);
         c.put(ui, 0, false, |ui| {
             ui.add_enabled_ui(editable && pc > 0, |ui| {
                 changed = ui.checkbox(&mut pv, "Preview only (thumbnail)").changed();
@@ -986,8 +986,8 @@ struct TableCols {
 impl TableCols {
     fn new(w: f32) -> Self {
         let show_post = w >= 620.0;
-        // Size fits "999.9 MB / 999.9 MB" in the monospace face; Progress fits bar + "Stopped at 66%".
-        let (stat, size, prog, post) = (30.0, 150.0, 150.0, if show_post { 140.0 } else { 0.0 });
+        // Size fits "999.9 MB / 999.9 MB" in the monospace face, with room to spare; Progress fits bar + "Stopped at 66%".
+        let (stat, size, prog, post) = (30.0, 158.0, 150.0, if show_post { 132.0 } else { 0.0 });
         let name = (w - stat - size - prog - post - 14.0).max(120.0);
         TableCols { widths: vec![stat, name, post, prog, size], show_post }
     }
