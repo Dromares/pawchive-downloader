@@ -11,7 +11,7 @@ use eframe::egui::{
     Stroke, TextEdit, Ui,
 };
 use pawchive_core::classify::{Category, CustomExts};
-use pawchive_core::names::creator_dir;
+use pawchive_core::names::{creator_dir, post_dir};
 
 use crate::app::{Action, App, Filter, ReadyRow, Tab};
 use crate::derive::{self, TYPE_ROWS};
@@ -170,7 +170,6 @@ impl App {
         let w = ui.available_width();
         let widths = vec![100.0, (w - 100.0 - 40.0 - 84.0).max(40.0), 40.0, 84.0];
         let probing = self.sizing_running();
-        let lower_bound = self.sizes_are_lower_bounds();
         ui.spacing_mut().item_spacing.y = 0.0;
 
         let head = Cols::new(ui, 20.0, widths.clone());
@@ -200,17 +199,7 @@ impl App {
                 let t = if live { "…".into() } else { comma(stat.count) };
                 ui.label(num(t).color(if has || live { p.ink } else { p.ink_dim }));
             });
-            c.put(ui, 3, true, |ui| {
-                size_cell(
-                    ui,
-                    p,
-                    live,
-                    has,
-                    stat.bytes,
-                    stat.unsized_files > 0 && (lower_bound || stat.bytes == 0),
-                    probing,
-                )
-            });
+            c.put(ui, 3, true, |ui| size_cell(ui, p, live, has, stat.bytes, stat.unsized_files > 0, probing));
             if changed {
                 if on {
                     self.checked.insert(cat);
@@ -278,11 +267,7 @@ impl App {
         if !live && !CustomExts::parse(&self.custom_ext).is_empty() {
             let line = match summary.per_category.get(&Category::Custom) {
                 Some(s) if s.count > 0 => {
-                    format!(
-                        "Matches {} files · {}",
-                        comma(s.count),
-                        size_label(s.bytes, lower_bound && s.unsized_files > 0)
-                    )
+                    format!("Matches {} files · {}", comma(s.count), size_label(s.bytes, s.unsized_files > 0))
                 }
                 _ => "No files with these extensions.".to_string(),
             };
@@ -355,14 +340,17 @@ impl App {
         let running = !matches!(self.model.phase, Phase::Ready);
         let files = if running { self.model.rows.len() } else { self.ready_rows().len() };
         let failed = self.model.failed();
+        let problems = self.model.problem_count();
         let narrow = ui.available_width() < 640.0;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = S1;
             ui.selectable_value(&mut self.tab, Tab::Files, format!("Files {}", comma(files)));
             let mut label =
-                RichText::new(if failed > 0 { format!("Problems {failed}") } else { "Problems".to_string() });
+                RichText::new(if problems > 0 { format!("Problems {problems}") } else { "Problems".to_string() });
             if failed > 0 {
                 label = label.color(p.bad);
+            } else if problems > 0 {
+                label = label.color(p.warn);
             }
             ui.selectable_value(&mut self.tab, Tab::Problems, label);
             ui.selectable_value(&mut self.tab, Tab::Log, "Log");
@@ -462,7 +450,9 @@ impl App {
                     line.push_str(" + thumbnails (size not measured)");
                 }
                 let downloadable: usize = summary.per_category.values().map(|s| s.count).sum();
+                let api_preview = summary.preview.count - summary.preview_missing;
                 let gone = summary.missing;
+                let note = derive::missing_note(&summary);
                 let finished_unsized =
                     !self.sizes_are_lower_bounds() && sel.unsized_files > 0 && !self.sizing_running();
                 // The card is green only while it has nothing to warn about.
@@ -473,27 +463,20 @@ impl App {
                         ui.label("This profile has no downloadable files, or the id doesn't exist.");
                     } else {
                         ui.label(line);
-                        if gone > 0 {
-                            // The 404 on the size probe is as permanent as a 404 on download.
-                            ui.add(
-                                egui::Label::new(RichText::new(format!(
-                                    "Pawchive no longer has {} of {} files (not found, HTTP 404). They can't be saved.",
-                                    comma(gone),
-                                    comma(all)
-                                )))
-                                .wrap(),
-                            );
+                        // A 404 on the size probe is as permanent as a 404 on download.
+                        for l in &note {
+                            ui.add(egui::Label::new(RichText::new(l)).wrap());
                         }
                         if finished_unsized {
                             ui.label(dim(
                                 p,
                                 format!(
-                                    "{} files couldn't be measured, so the size above leaves them out.",
+                                    "{} files couldn't be measured, so the size above is at least that.",
                                     comma(sel.unsized_files)
                                 ),
                             ));
                         }
-                        if summary.preview.count > downloadable {
+                        if api_preview > downloadable {
                             ui.horizontal_top(|ui| {
                                 ui.label(RichText::new("ⓘ").color(p.accent));
                                 ui.add(
@@ -501,7 +484,7 @@ impl App {
                                         p,
                                         format!(
                                             "Mostly preview-only: {} of {} files. Pawchive has full-size copies of just {}.",
-                                            comma(summary.preview.count),
+                                            comma(api_preview),
                                             comma(all),
                                             comma(downloadable)
                                         ),
@@ -509,9 +492,7 @@ impl App {
                                     .wrap(),
                                 );
                             });
-                        } else if gone > 0 {
-                            ui.label(dim(p, "Files marked \"Not on the server\" are left out of the download."));
-                        } else {
+                        } else if gone == 0 {
                             ui.label(dim(
                                 p,
                                 "Everything listed below will be saved. Untick types on the left to leave them out.",
@@ -648,7 +629,9 @@ impl App {
     fn problems(&mut self, ui: &mut Ui, p: &Pal, acts: &mut Vec<Action>) {
         let rows = &self.model.rows;
         let bad: Vec<usize> = (0..rows.len()).filter(|&i| matches!(rows[i].state, RowState::Failed { .. })).collect();
-        if bad.is_empty() {
+        // Files the size probe got a 404 for: listed under one heading, never retried.
+        let gone: Vec<usize> = (0..self.model.files.len()).filter(|&i| self.model.files[i].missing).collect();
+        if bad.is_empty() && gone.is_empty() {
             ui.add_space(S5);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("No problems").strong());
@@ -658,76 +641,123 @@ impl App {
         }
         let retryable = self.model.retryable();
         let can_retry = matches!(self.model.phase, Phase::Finished | Phase::Cancelled);
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(if bad.len() == 1 {
-                    "1 file failed".to_string()
-                } else {
-                    format!("{} files failed", bad.len())
-                })
-                .strong(),
-            );
-            ui.label(dim(p, format!("· {retryable} can be retried")));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let b = Button::new(format!("Retry failed ({retryable})")).min_size(vec2(0.0, 30.0));
-                if ui.add_enabled(retryable > 0 && can_retry, b).clicked() {
-                    acts.push(Action::RetryFailed);
-                }
+        if !bad.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(if bad.len() == 1 {
+                        "1 file failed".to_string()
+                    } else {
+                        format!("{} files failed", bad.len())
+                    })
+                    .strong(),
+                );
+                ui.label(dim(p, format!("· {retryable} can be retried")));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let b = Button::new(format!("Retry failed ({retryable})")).min_size(vec2(0.0, 30.0));
+                    if ui.add_enabled(retryable > 0 && can_retry, b).clicked() {
+                        acts.push(Action::RetryFailed);
+                    }
+                });
             });
-        });
-        ui.add_space(S1);
+            ui.add_space(S1);
+        }
+        // One list, one row height: failed downloads, then the heading, then the missing files.
+        let head_at = bad.len();
+        let total = bad.len() + if gone.is_empty() { 0 } else { 1 + gone.len() };
         Frame::new().stroke(Stroke::new(1.0, p.line)).corner_radius(CornerRadius::same(RADIUS)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;
             let h = ui.available_height().max(120.0);
-            ScrollArea::vertical().auto_shrink([false, false]).max_height(h).show_rows(
-                ui,
-                52.0,
-                bad.len(),
-                |ui, range| {
-                    for n in range {
-                        let i = bad[n];
-                        let r = &self.model.rows[i];
-                        let RowState::Failed { error, permanent } = &r.state else { continue };
-                        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::hover());
-                        if n % 2 == 1 {
-                            ui.painter().rect_filled(rect.shrink(1.0), 0.0, p.surface);
-                        }
-                        let inner = rect.shrink2(vec2(12.0, 6.0));
-                        let right =
-                            Rect::from_min_max(egui::pos2(inner.right() - 84.0, inner.top()), inner.right_bottom());
-                        let left =
-                            Rect::from_min_max(inner.left_top(), egui::pos2(inner.right() - 92.0, inner.bottom()));
+            ScrollArea::vertical().auto_shrink([false, false]).max_height(h).show_rows(ui, 52.0, total, |ui, range| {
+                for n in range {
+                    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::hover());
+                    if n % 2 == 1 {
+                        ui.painter().rect_filled(rect.shrink(1.0), 0.0, p.surface);
+                    }
+                    let inner = rect.shrink2(vec2(12.0, 6.0));
+                    if n == head_at && !gone.is_empty() {
                         ui.scope_builder(
-                            egui::UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)),
+                            egui::UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)),
                             |ui| {
-                                ui.label(RichText::new("×").color(p.bad).strong());
+                                ui.label(RichText::new("⚠").color(p.warn).strong());
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 2.0;
-                                    ui.add(egui::Label::new(RichText::new(&r.name).strong()).truncate());
-                                    let why = format!("{} · {}", explain_failure(error), r.post);
                                     ui.add(
-                                        egui::Label::new(RichText::new(why).color(p.ink_dim).size(T_SMALL)).truncate(),
+                                        egui::Label::new(
+                                            RichText::new(format!("Not on Pawchive · {}", comma(gone.len()))).strong(),
+                                        )
+                                        .truncate(),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(
+                                                "Pawchive no longer has these files. Retry failed skips them.",
+                                            )
+                                            .color(p.ink_dim)
+                                            .size(T_SMALL),
+                                        )
+                                        .truncate(),
                                     );
                                 });
                             },
                         );
+                        continue;
+                    }
+                    if n > head_at && !gone.is_empty() {
+                        let f = &self.model.files[gone[n - head_at - 1]];
+                        let post = post_dir(f.post_published.as_deref(), &f.post_id, &f.post_title);
                         ui.scope_builder(
-                            egui::UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)),
+                            egui::UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)),
                             |ui| {
-                                if *permanent {
-                                    ui.label(dim(p, "Won't retry"));
-                                } else if ui
-                                    .add_enabled(can_retry, Button::new("Retry").min_size(vec2(64.0, 28.0)))
-                                    .clicked()
-                                {
-                                    acts.push(Action::RetryOne(i));
-                                }
+                                ui.label(RichText::new("×").color(p.warn).strong());
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                    ui.add(egui::Label::new(RichText::new(&f.name).strong()).truncate());
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!("Not on Pawchive (404) · {post}"))
+                                                .color(p.ink_dim)
+                                                .size(T_SMALL),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
                             },
                         );
+                        continue;
                     }
-                },
-            );
+                    let i = bad[n];
+                    let r = &self.model.rows[i];
+                    let RowState::Failed { error, permanent } = &r.state else { continue };
+                    let right = Rect::from_min_max(egui::pos2(inner.right() - 84.0, inner.top()), inner.right_bottom());
+                    let left = Rect::from_min_max(inner.left_top(), egui::pos2(inner.right() - 92.0, inner.bottom()));
+                    ui.scope_builder(
+                        egui::UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)),
+                        |ui| {
+                            ui.label(RichText::new("×").color(p.bad).strong());
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.add(egui::Label::new(RichText::new(&r.name).strong()).truncate());
+                                let why = format!("{} · {}", explain_failure(error), r.post);
+                                ui.add(egui::Label::new(RichText::new(why).color(p.ink_dim).size(T_SMALL)).truncate());
+                            });
+                        },
+                    );
+                    ui.scope_builder(
+                        egui::UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)),
+                        |ui| {
+                            if *permanent {
+                                ui.label(dim(p, "Won't retry"));
+                            } else if ui
+                                .add_enabled(can_retry, Button::new("Retry").min_size(vec2(64.0, 28.0)))
+                                .clicked()
+                            {
+                                acts.push(Action::RetryOne(i));
+                            }
+                        },
+                    );
+                }
+            });
         });
     }
 
@@ -1110,7 +1140,7 @@ fn ready_row(ui: &mut Ui, p: &Pal, cols: &Cols, r: &ReadyRow, _zebra: bool) {
     put_post(ui, p, cols, &r.post);
     cols.put(ui, 3, false, |ui| {
         if r.missing {
-            ui.label(RichText::new("Not on the server").size(T_SMALL).color(p.warn));
+            ui.label(RichText::new("Not on Pawchive").size(T_SMALL).color(p.warn));
         } else {
             ui.label(dim(p, "Ready"));
         }

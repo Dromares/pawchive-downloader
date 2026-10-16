@@ -35,13 +35,30 @@ impl Stat {
     }
 }
 
+/// A file whose original is gone from the server (`missing`) but which is an image, so the
+/// thumbnail host very likely still has it. Decided by extension alone (no custom extensions, no
+/// probe): thumbnails are not probed at scan time.
+pub fn missing_with_thumbnail(f: &FileEntry) -> bool {
+    f.missing && classify(&f.name, &f.path, &CustomExts::default(), None) == Category::Image
+}
+
+/// The file can only be had as a thumbnail: the API says so, or the original answered 404 and it
+/// is an image.
+pub fn thumbnail_only(f: &FileEntry) -> bool {
+    f.preview_only || missing_with_thumbnail(f)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FileSummary {
     /// Downloadable (full-size) files per category.
     pub per_category: BTreeMap<Category, Stat>,
-    /// Preview-only files (thumbnail only), kept out of the category rows.
+    /// Thumbnail-only files, kept out of the category rows: API `preview_only` files plus missing
+    /// images (`preview_missing` of them).
     pub preview: Stat,
-    /// Full-size files the server answered 404 for when sized: not offered, not counted above.
+    /// How many of `preview` are images whose original answered 404 (not API `preview_only`).
+    pub preview_missing: usize,
+    /// All files whose original the server answered 404 for when sized. They are in no category
+    /// row; the images among them are also counted in `preview`.
     pub missing: usize,
 }
 
@@ -50,6 +67,12 @@ pub fn summarize(files: &[FileEntry], custom: &CustomExts) -> FileSummary {
     for f in files {
         if f.missing {
             s.missing += 1;
+        }
+        if missing_with_thumbnail(f) {
+            s.preview_missing += 1;
+            s.preview.add(f);
+        } else if f.missing {
+            // report-only: no thumbnail exists for it
         } else if f.preview_only {
             s.preview.add(f);
         } else {
@@ -84,27 +107,69 @@ pub fn plan_downloads(
         let (dir, alloc) = per_post.entry(f.post_id.as_str()).or_insert_with(|| {
             (post_dir(f.post_published.as_deref(), &f.post_id, &f.post_title), NameAllocator::new())
         });
+        let thumb = thumbnail_only(f);
         let mut name = sanitize_component(&f.name, MAX_COMPONENT_BYTES);
-        if f.preview_only {
+        if thumb {
             name = sanitize_component(&thumb_name(&name), MAX_COMPONENT_BYTES);
         }
         let name = alloc.allocate(&name);
-        if f.missing {
-            continue; // the server already said 404; a download could only fail
+        if f.missing && !thumb {
+            continue; // the server already said 404 and no thumbnail exists: a download could only fail
         }
-        let selected =
-            if f.preview_only { sel.include_preview } else { sel.categories.contains(&category_of(f, custom)) };
+        let selected = if thumb { sel.include_preview } else { sel.categories.contains(&category_of(f, custom)) };
         if !selected {
             continue;
         }
         let dest = root.join(&*dir).join(&name);
         jobs.push(Job {
             id: jobs.len() as u64,
-            url: if f.preview_only { hosts.thumb_url(&f.path) } else { hosts.full_url(&f.path) },
+            url: if thumb { hosts.thumb_url(&f.path) } else { hosts.full_url(&f.path) },
             dest,
-            expected_size: if f.preview_only { None } else { f.size },
+            expected_size: if thumb { None } else { f.size },
             label: format!("{dir}/{name}"),
         });
     }
     jobs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::creator::CreatorRef;
+    use crate::model::Service;
+
+    fn gone(name: &str) -> FileEntry {
+        FileEntry {
+            post_id: "1".into(),
+            post_title: "t".into(),
+            post_published: None,
+            name: name.into(),
+            path: format!("/ab/{name}"),
+            preview_only: false,
+            node: None,
+            size: None,
+            content_type: None,
+            missing: true,
+        }
+    }
+
+    /// Missing images become `.thumb` jobs on the thumbnail host, only when Preview only is ticked;
+    /// missing non-images never become jobs (no thumbnail exists for them).
+    #[test]
+    fn missing_images_plan_as_thumbnails_and_other_missing_files_never_plan() {
+        let creator = CreatorRef { service: Service::Fanbox, id: "9".into() };
+        let files = vec![gone("a.jpg"), gone("b.zip"), gone("c.txt"), gone("d.PNG")];
+        let plan = |include_preview| {
+            let sel = Selection { categories: Category::ALL.into_iter().collect(), include_preview };
+            plan_downloads(&creator, &files, &sel, &CustomExts::default(), Path::new("/o"), &Hosts::default())
+        };
+        assert!(plan(false).is_empty());
+        let jobs = plan(true);
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.iter().all(|j| j.label.contains(".thumb.") && j.expected_size.is_none()));
+        assert!(jobs.iter().all(|j| j.url.contains("/thumbnail/")), "{:?}", jobs[0].url);
+        let s = summarize(&files, &CustomExts::default());
+        assert_eq!((s.missing, s.preview_missing, s.preview.count), (4, 2, 2));
+        assert!(s.per_category.is_empty());
+    }
 }

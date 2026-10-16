@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Frame, Key, KeyboardShortcut, Margin, Modifiers};
 use pawchive_core::api::Hosts;
 use pawchive_core::classify::{Category, CustomExts};
+use pawchive_core::model::FileEntry;
 use pawchive_core::names::{creator_dir, post_dir};
-use pawchive_core::plan::{plan_downloads, summarize, FileSummary, Selection};
+use pawchive_core::plan::{missing_with_thumbnail, plan_downloads, summarize, FileSummary, Selection};
 use pawchive_core::session::{Command, SessionHandle, UiEvent};
 use pawchive_core::settings::Settings;
 
@@ -173,13 +174,12 @@ impl App {
 
     pub(crate) fn selection(&mut self) -> Sel {
         let summary = self.summary();
-        derive::selection(&summary, &self.checked, self.include_preview, self.sizes_are_lower_bounds())
+        derive::selection(&summary, &self.checked, self.include_preview)
     }
 
-    /// Every full-size file the scan found is gone from the server (and none is a custom match).
+    /// Every file the scan found is gone from the server (see [`derive::all_gone`]).
     pub(crate) fn all_gone(&mut self) -> bool {
-        let s = self.summary();
-        s.missing > 0 && s.per_category.is_empty()
+        derive::all_gone(&self.summary())
     }
 
     /// The files a download would save right now, named the way they will be on disk.
@@ -210,8 +210,10 @@ impl App {
                     ReadyRow { post: post.to_string(), name: name.to_string(), size: j.expected_size, missing: false }
                 })
                 .collect();
-                // Gone files stay visible, marked, after the ones that will be saved.
-                rows.extend(self.model.files.iter().filter(|f| f.missing).map(|f| ReadyRow {
+                // Gone files stay visible, marked, after the ones that will be saved. A missing image
+                // whose thumbnail is ticked is already above, as a `.thumb` job.
+                let thumb_saved = |f: &FileEntry| self.include_preview && missing_with_thumbnail(f);
+                rows.extend(self.model.files.iter().filter(|f| f.missing && !thumb_saved(f)).map(|f| ReadyRow {
                     post: post_dir(f.post_published.as_deref(), &f.post_id, &f.post_title),
                     name: f.name.clone(),
                     size: None,

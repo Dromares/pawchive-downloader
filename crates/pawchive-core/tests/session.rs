@@ -211,6 +211,72 @@ fn files_that_404_when_sized_are_not_offered_for_download() {
     assert_eq!(started, 0, "404'd files were queued for download");
 }
 
+/// CEO call on DAN-1543 D1: a missing image is offered as a thumbnail under Preview only (it is
+/// not probed at scan time); a missing non-image is report-only (see plan.rs tests); Retry failed never reruns either.
+#[test]
+fn missing_images_are_offered_as_thumbnails_and_never_retried() {
+    use pawchive_core::plan::missing_with_thumbnail;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mock = rt.block_on(gone_site());
+    let (handle, rx) = start(&mock.base);
+    handle.send(Command::Scan { url: "https://pawchive.pw/fanbox/user/119251".into() });
+    let files = wait_for(&rx, |e| match e {
+        UiEvent::ScanFinished { files, .. } => Some(files),
+        _ => None,
+    });
+    let mut missing = Vec::new();
+    wait_for(&rx, |e| match e {
+        UiEvent::FileMissing { index } => {
+            missing.push(index);
+            None
+        }
+        UiEvent::SizingFinished { skipped: false } => Some(()),
+        _ => None,
+    });
+    let mut known = files.clone();
+    for &i in &missing {
+        known[i].missing = true;
+    }
+    let images = known.iter().filter(|f| missing_with_thumbnail(f)).count();
+    assert!(images > 0, "fixture has images");
+
+    let out = TempDir::new().unwrap();
+    let start_dl = |include_preview| {
+        handle.send(Command::StartDownload {
+            selection: Selection { categories: Category::ALL.into_iter().collect(), include_preview },
+            custom_extensions: String::new(),
+            output: out.path().to_path_buf(),
+        })
+    };
+    // Preview only unticked (the default): nothing is queued, images included.
+    start_dl(false);
+    let queued = wait_for(&rx, |e| match e {
+        UiEvent::DownloadStarted { jobs } => Some(jobs.len()),
+        UiEvent::DownloadFinished(_) => Some(0),
+        _ => None,
+    });
+    assert_eq!(queued, 0);
+
+    // Ticked: exactly the missing images, named `.thumb`, fetched from the thumbnail host.
+    start_dl(true);
+    let labels = wait_for(&rx, |e| match e {
+        UiEvent::DownloadStarted { jobs } => Some(jobs.into_iter().map(|j| j.label).collect::<Vec<_>>()),
+        _ => None,
+    });
+    assert_eq!(labels.len(), images, "{labels:?}");
+    assert!(labels.iter().all(|l| l.contains(".thumb.")), "{labels:?}");
+    // The thumbnails 404 here too: an ordinary permanent failure, so Retry failed has nothing to do.
+    let s = wait_for(&rx, |e| match e {
+        UiEvent::DownloadFinished(s) => Some(s),
+        _ => None,
+    });
+    assert_eq!((s.done, s.failed), (0, images), "{s:?}");
+    let before = mock.count();
+    handle.send(Command::RetryFailed);
+    wait_for(&rx, |e| matches!(e, UiEvent::Log(m) if m.contains("No failed files")).then_some(()));
+    assert_eq!(mock.count(), before, "Retry failed made requests for files that are gone");
+}
+
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut v = vec![];
     for e in std::fs::read_dir(dir).unwrap() {

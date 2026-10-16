@@ -37,17 +37,16 @@ pub struct Sel {
     pub files: usize,
     /// Sum of the sizes we know. Thumbnails are never counted.
     pub bytes: u64,
-    /// Some selected file has no size yet and sizing is still running (or was skipped), so `bytes`
-    /// is a lower bound (shown as `≥`). Once sizing has finished the `≥` goes, even if a few
-    /// probes failed; `unsized_files` says how many.
+    /// Some selected file has no size, so `bytes` is a lower bound (shown as `≥`). That is the case
+    /// while sizing runs, after Skip, and after a finished run only for probes that failed for a
+    /// transient reason: a 404 probe marks the file missing and takes it out of the selection.
     pub partial: bool,
-    /// Selected files whose size is not known.
+    /// Selected files whose size is not known (`unsized_files` says how many the `≥` stands for).
     pub unsized_files: usize,
     pub thumbnails: bool,
 }
 
-/// `lower_bound`: sizes may still arrive (sizing running) or were given up on (skipped).
-pub fn selection(summary: &FileSummary, checked: &HashSet<Category>, include_preview: bool, lower_bound: bool) -> Sel {
+pub fn selection(summary: &FileSummary, checked: &HashSet<Category>, include_preview: bool) -> Sel {
     let mut s = Sel::default();
     for cat in wanted(checked) {
         if let Some(stat) = summary.per_category.get(&cat) {
@@ -56,7 +55,7 @@ pub fn selection(summary: &FileSummary, checked: &HashSet<Category>, include_pre
             s.unsized_files += stat.unsized_files;
         }
     }
-    s.partial = lower_bound && s.unsized_files > 0;
+    s.partial = s.unsized_files > 0;
     if include_preview && summary.preview.count > 0 {
         s.files += summary.preview.count;
         s.thumbnails = true;
@@ -64,8 +63,40 @@ pub fn selection(summary: &FileSummary, checked: &HashSet<Category>, include_pre
     s
 }
 
+/// Every file the scan found answered 404 when sized: nothing but (maybe) thumbnails can be saved.
+pub fn all_gone(s: &FileSummary) -> bool {
+    s.missing > 0 && s.per_category.is_empty() && s.preview.count == s.preview_missing
+}
+
+/// Status-card copy for files Pawchive no longer has (product call on DAN-1543 D1). Empty when
+/// none are missing; "Everything listed below will be saved." is only for that empty case.
+pub fn missing_note(s: &FileSummary) -> Vec<String> {
+    let n = s.missing;
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    out.push(if all_gone(s) {
+        "Pawchive no longer has any of this profile's files.".to_string()
+    } else if n == 1 {
+        "1 file is no longer on Pawchive and can't be downloaded.".to_string()
+    } else {
+        format!("{} files are no longer on Pawchive and can't be downloaded.", crate::format::comma(n))
+    });
+    match s.preview_missing {
+        0 => {}
+        1 => out.push("1 of them still has a thumbnail. Tick Preview only to save that.".to_string()),
+        k => out.push(format!(
+            "{} of them still have thumbnails. Tick Preview only to save those.",
+            crate::format::comma(k)
+        )),
+    }
+    out
+}
+
 /// Why Download is off while results are on screen (`None` = it can start).
-/// `all_gone`: every full-size file the scan found answered 404 when sized.
+/// `all_gone`: every file the scan found answered 404 when sized (a ticked Preview only row still
+/// counts in `selected`, so Download works for the thumbnails).
 pub fn download_block(has_folder: bool, selected: usize, all_gone: bool) -> Option<&'static str> {
     if !has_folder {
         Some("Choose an output folder to enable Download.")
@@ -125,17 +156,17 @@ mod tests {
 
     #[test]
     fn selection_counts_ticked_types_plus_custom_matches() {
-        let sel = selection(&summary(), &default_checked(), false, true);
+        let sel = selection(&summary(), &default_checked(), false);
         assert_eq!((sel.files, sel.bytes, sel.partial, sel.thumbnails), (58 + 28 + 4, 540, true, false));
-        let one = selection(&summary(), &[Category::Image].into_iter().collect(), false, true);
+        let one = selection(&summary(), &[Category::Image].into_iter().collect(), false);
         assert_eq!((one.files, one.bytes, one.partial), (62, 440, false), "custom matches are always selected");
     }
 
     #[test]
     fn thumbnails_add_files_but_never_bytes() {
-        let sel = selection(&summary(), &default_checked(), true, true);
+        let sel = selection(&summary(), &default_checked(), true);
         assert_eq!((sel.files, sel.bytes, sel.thumbnails), (58 + 28 + 4 + 4019, 540, true));
-        let none = selection(&FileSummary::default(), &default_checked(), true, true);
+        let none = selection(&FileSummary::default(), &default_checked(), true);
         assert_eq!((none.files, none.thumbnails), (0, false), "no preview files, nothing to tick");
     }
 
@@ -147,55 +178,117 @@ mod tests {
         assert!(download_block(true, 0, true).unwrap().starts_with("Pawchive no longer has"));
     }
 
+    /// A 404 probe takes the file out of the selection, so only transient probe failures can
+    /// leave sizes unknown after sizing finished; those keep the `≥` and are counted.
     #[test]
-    fn the_lower_bound_marker_goes_when_sizing_ends_even_if_some_probes_failed() {
+    fn the_lower_bound_marker_stays_only_for_files_that_could_not_be_measured() {
         let checked = default_checked();
-        let mid = selection(&summary(), &checked, false, true);
-        assert!(mid.partial, "mid-probe: ≥");
-        let done = selection(&summary(), &checked, false, false);
-        assert!(!done.partial, "sizing finished: no ≥ although 3 probes failed");
-        assert_eq!(done.unsized_files, 3, "the failed probes are still counted, for an honest note");
+        let s = summary(); // 3 archives whose probe failed transiently
+        let sel = selection(&s, &checked, false);
+        assert!(sel.partial);
+        assert_eq!(sel.unsized_files, 3, "the card says how many are unsized");
+        let mut all_sized = summary();
+        all_sized.per_category.get_mut(&Category::Archive).unwrap().unsized_files = 0;
+        assert!(!selection(&all_sized, &checked, false).partial, "everything measured: no ≥");
     }
 
-    /// DAN-1543 D1: every probe 404s (creator 1386751). Nothing is selectable, the count of files
-    /// Pawchive no longer has is reported, and Download says why it is off.
+    fn entry(name: &str) -> pawchive_core::model::FileEntry {
+        pawchive_core::model::FileEntry {
+            post_id: "1".into(),
+            post_title: "t".into(),
+            post_published: None,
+            name: name.into(),
+            path: format!("/{name}"),
+            preview_only: false,
+            node: None,
+            size: None,
+            content_type: None,
+            missing: false,
+        }
+    }
+
+    fn scanned(names: &[&str]) -> Model {
+        use pawchive_core::creator::CreatorRef;
+        use pawchive_core::model::Service;
+        let mut m = Model::default();
+        let creator = CreatorRef { service: Service::Fanbox, id: "1386751".into() };
+        let files = names.iter().map(|n| entry(n)).collect();
+        m.apply(UiEvent::ScanFinished { creator, posts: 1, files }, Instant::now());
+        m
+    }
+
+    /// DAN-1543 D1, CEO call: every probe 404s. Nothing is selectable, the card says exactly that
+    /// Pawchive has none of the files, and Download's count is 0 (the thumbnails need a tick).
     #[test]
-    fn files_that_404_when_sized_are_not_selected_and_are_counted() {
+    fn all_missing_card_text_is_exact_and_download_count_is_zero() {
         use crate::state::Level;
         use pawchive_core::classify::CustomExts;
-        use pawchive_core::creator::CreatorRef;
-        use pawchive_core::model::{FileEntry, Service};
         use pawchive_core::plan::summarize;
         let now = Instant::now();
-        let mut m = Model::default();
-        let files: Vec<FileEntry> = (0..6)
-            .map(|i| FileEntry {
-                post_id: "1".into(),
-                post_title: "t".into(),
-                post_published: None,
-                name: format!("{i}.jpg"),
-                path: format!("/{i}.jpg"),
-                preview_only: false,
-                node: None,
-                size: None,
-                content_type: None,
-                missing: false,
-            })
-            .collect();
-        let creator = CreatorRef { service: Service::Fanbox, id: "1386751".into() };
-        m.apply(UiEvent::ScanFinished { creator, posts: 1, files }, now);
-        for index in 0..6 {
+        let mut m = scanned(&["a.zip", "b.txt", "c.zip"]);
+        for index in 0..3 {
             m.apply(UiEvent::FileMissing { index }, now);
         }
         m.apply(UiEvent::SizingFinished { skipped: false }, now);
-        assert_eq!(m.missing(), 6);
-        assert!(m.log.iter().any(|l| l.level == Level::Warn && l.text.starts_with("6 of 6 files are not on")));
+        assert_eq!(m.missing(), 3);
+        assert!(m
+            .log
+            .iter()
+            .any(|l| l.level == Level::Warn && l.text.starts_with("3 of 3 files are no longer on Pawchive")));
         let s = summarize(&m.files, &CustomExts::default());
-        assert_eq!(s.missing, 6);
-        assert!(s.per_category.is_empty(), "gone files are not in any type row");
-        let sel = selection(&s, &default_checked(), false, false);
+        assert!(s.per_category.is_empty(), "missing files are in no type row");
+        assert!(all_gone(&s));
+        assert_eq!(missing_note(&s), vec!["Pawchive no longer has any of this profile's files."]);
+        let sel = selection(&s, &default_checked(), false);
         assert_eq!((sel.files, sel.bytes, sel.partial), (0, 0, false));
-        assert!(download_block(true, sel.files, s.missing > 0).unwrap().contains("no longer has"));
+        assert!(download_block(true, sel.files, all_gone(&s)).is_some(), "Download is disabled");
+    }
+
+    /// Missing images move into the Preview only row (unchecked by default); missing non-images are
+    /// report-only. All images missing: Download stays off until Preview only is ticked.
+    #[test]
+    fn missing_images_go_to_the_preview_row_and_other_files_are_report_only() {
+        use pawchive_core::classify::CustomExts;
+        use pawchive_core::plan::summarize;
+        let now = Instant::now();
+        let mut m = scanned(&["a.jpg", "b.png", "c.zip", "d.jpg"]);
+        for index in 0..3 {
+            m.apply(UiEvent::FileMissing { index }, now);
+        }
+        m.apply(UiEvent::SizingFinished { skipped: false }, now);
+        let s = summarize(&m.files, &CustomExts::default());
+        assert_eq!((s.missing, s.preview_missing, s.preview.count), (3, 2, 2));
+        assert_eq!(s.per_category.get(&Category::Image).map(|x| x.count), Some(1), "d.jpg is still on the server");
+        assert!(!all_gone(&s), "d.jpg is fine");
+        assert_eq!(
+            missing_note(&s),
+            vec![
+                "3 files are no longer on Pawchive and can't be downloaded.",
+                "2 of them still have thumbnails. Tick Preview only to save those."
+            ]
+        );
+        let off = selection(&s, &default_checked(), false);
+        let on = selection(&s, &default_checked(), true);
+        assert_eq!((off.files, on.files, on.thumbnails), (1, 3, true));
+
+        // only the two missing images, nothing else
+        let mut m = scanned(&["a.jpg", "b.png"]);
+        for index in 0..2 {
+            m.apply(UiEvent::FileMissing { index }, now);
+        }
+        let s = summarize(&m.files, &CustomExts::default());
+        assert!(all_gone(&s));
+        assert_eq!(missing_note(&s)[0], "Pawchive no longer has any of this profile's files.");
+        assert_eq!(missing_note(&s)[1], "2 of them still have thumbnails. Tick Preview only to save those.");
+        assert!(download_block(true, selection(&s, &default_checked(), false).files, all_gone(&s)).is_some());
+        let ticked = selection(&s, &default_checked(), true);
+        assert_eq!(ticked.files, 2);
+        assert_eq!(download_block(true, ticked.files, all_gone(&s)), None, "Preview only ticked: Download works");
+    }
+
+    #[test]
+    fn nothing_missing_says_nothing() {
+        assert!(missing_note(&FileSummary::default()).is_empty());
     }
 
     #[test]

@@ -184,6 +184,11 @@ impl Model {
         self.files.iter().filter(|f| f.missing).count()
     }
 
+    /// Everything the Problems tab lists: failed downloads plus the files Pawchive no longer has.
+    pub fn problem_count(&self) -> usize {
+        self.failed() + self.missing()
+    }
+
     pub fn failed(&self) -> usize {
         self.count(|s| matches!(s, RowState::Failed { .. }))
     }
@@ -449,7 +454,7 @@ impl Model {
                     // One line, not one per file: a creator can have thousands.
                     self.push_log(
                         Level::Warn,
-                        format!("{gone} of {all} files are not on the Pawchive server any more (HTTP 404) and will be left out"),
+                        format!("{gone} of {all} files are no longer on Pawchive (HTTP 404) and can't be downloaded"),
                     );
                 }
             }
@@ -576,7 +581,7 @@ pub fn explain_failure(error: &str) -> String {
         .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
         .and_then(|c| c.parse::<u16>().ok());
     match (http, tries) {
-        (Some(404), _) => "Not on the server (404). Pawchive no longer has this file.".into(),
+        (Some(404), _) => "Not on Pawchive (404). Pawchive no longer has this file.".into(),
         (Some(403 | 429), _) => "The site kept asking us to slow down".into(),
         (Some(code), Some(n)) => format!("Server error ({code}) after {n} tries"),
         (Some(code), None) => format!("Server error ({code})"),
@@ -840,7 +845,7 @@ mod tests {
     fn failures_read_in_plain_language() {
         assert_eq!(
             explain_failure("HTTP 404: not found on the server"),
-            "Not on the server (404). Pawchive no longer has this file."
+            "Not on Pawchive (404). Pawchive no longer has this file."
         );
         assert_eq!(explain_failure("gave up after 5 tries: HTTP 503"), "Server error (503) after 5 tries");
         assert_eq!(explain_failure("gave up after 5 tries: HTTP 429"), "The site kept asking us to slow down");
