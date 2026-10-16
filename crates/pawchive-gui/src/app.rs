@@ -1,38 +1,60 @@
+//! The application object: owns the model, the user's choices and the session handle, turns
+//! [`Action`]s into session commands, and lays out the window. Drawing lives in `view` and `modals`.
+
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Frame, Key, KeyboardShortcut, Margin, Modifiers};
+use pawchive_core::api::Hosts;
 use pawchive_core::classify::{Category, CustomExts};
-use pawchive_core::plan::{summarize, FileSummary, Selection};
+use pawchive_core::names::creator_dir;
+use pawchive_core::plan::{plan_downloads, summarize, FileSummary, Selection};
 use pawchive_core::session::{Command, SessionHandle, UiEvent};
-use pawchive_core::settings::{Settings, MAX_CONCURRENCY, MIN_DELAY_MS};
+use pawchive_core::settings::Settings;
 
+use crate::derive::{self, Sel};
 use crate::dev;
-use crate::format::{human_size, size_cell};
-use crate::state::{Model, Phase, RowState, Sizing};
+use crate::state::{Level, Model, Phase, RowState, Sizing};
+use crate::theme::{self, Pal, LEFT_W, S4};
 
-pub struct App {
-    handle: SessionHandle,
-    rx: Receiver<UiEvent>,
-    model: Model,
-    settings: Settings,
-    draft: Settings,
-    settings_open: bool,
-    url: String,
-    output: String,
-    custom_ext: String,
-    checked: HashSet<Category>,
-    include_preview: bool,
-    summary_cache: Option<(u64, String, FileSummary)>,
-    // folder / cookie-file pickers run on their own thread
-    picker_tx: Sender<(Picker, Option<PathBuf>)>,
-    picker_rx: Receiver<(Picker, Option<PathBuf>)>,
-    note_tx: Sender<String>,
-    note_rx: Receiver<String>,
-    started: Instant,
-    shot_done: bool,
+/// Everything a click or shortcut can ask for. Drawing code only collects these; `App::perform`
+/// is the one place that turns them into model changes and session commands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Scan,
+    CancelScan,
+    Download,
+    Pause,
+    Resume,
+    Cancel,
+    RetryFailed,
+    RetryOne(usize),
+    OpenFolder,
+    CopyPath,
+    Browse,
+    ChooseCookie,
+    SkipSizing,
+    CopyLog,
+    OpenSettings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    Files,
+    Problems,
+    Log,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Filter {
+    All,
+    Active,
+    Queued,
+    Done,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -41,8 +63,54 @@ enum Picker {
     CookieFile,
 }
 
+/// A row of the "what will be saved" preview shown before a download starts.
+pub struct ReadyRow {
+    pub post: String,
+    pub name: String,
+    pub size: Option<u64>,
+}
+
+pub struct App {
+    pub(crate) handle: SessionHandle,
+    rx: Receiver<UiEvent>,
+    pub(crate) model: Model,
+    /// Concurrency, delay, contact and cookie path are edited live in the settings dialog.
+    pub(crate) settings: Settings,
+    saved: Settings,
+    sent: Settings,
+    pub(crate) url: String,
+    pub(crate) url_error: Option<String>,
+    pub(crate) output: String,
+    pub(crate) custom_ext: String,
+    pub(crate) checked: HashSet<Category>,
+    pub(crate) include_preview: bool,
+    pub(crate) tab: Tab,
+    pub(crate) filter: Filter,
+    pub(crate) settings_open: bool,
+    pub(crate) quit_open: bool,
+    quit_now: bool,
+    focus_url: bool,
+    summary_cache: Option<(u64, String, Arc<FileSummary>)>,
+    ready_cache: Option<(String, Arc<Vec<ReadyRow>>)>,
+    picker_tx: Sender<(Picker, Option<PathBuf>)>,
+    picker_rx: Receiver<(Picker, Option<PathBuf>)>,
+    pub(crate) picker_busy: bool,
+    note_tx: Sender<String>,
+    note_rx: Receiver<String>,
+    started: Instant,
+    shot_done: bool,
+    last_title: String,
+}
+
 impl App {
-    pub fn new(settings: Settings, handle: SessionHandle, rx: Receiver<UiEvent>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        settings: Settings,
+        handle: SessionHandle,
+        rx: Receiver<UiEvent>,
+    ) -> Self {
+        theme::install_fonts(&cc.egui_ctx);
+        theme::install_styles(&cc.egui_ctx);
         let (picker_tx, picker_rx) = channel();
         let (note_tx, note_rx) = channel();
         let mut app = App {
@@ -51,54 +119,162 @@ impl App {
             model: Model::default(),
             output: settings.output_dir.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             custom_ext: settings.custom_extensions.clone(),
-            draft: settings.clone(),
+            saved: settings.clone(),
+            sent: settings.clone().normalized(),
             settings,
-            settings_open: false,
             url: String::new(),
-            checked: Category::ALL.into_iter().collect(),
+            url_error: None,
+            checked: derive::default_checked(),
             include_preview: false, // thumbnails are opt-in
+            tab: Tab::Files,
+            filter: Filter::All,
+            settings_open: dev::open_settings(),
+            quit_open: false,
+            quit_now: false,
+            focus_url: false,
             summary_cache: None,
+            ready_cache: None,
             picker_tx,
             picker_rx,
+            picker_busy: false,
             note_tx,
             note_rx,
             started: Instant::now(),
             shot_done: false,
+            last_title: String::new(),
         };
-        app.settings_open = dev::open_settings();
         if let Some(url) = dev::autoscan_url() {
-            app.url = url.clone();
-            app.handle.send(Command::Scan { url });
+            app.url = url;
+            app.perform(Action::Scan, &cc.egui_ctx);
         }
         app
     }
 
-    fn drain(&mut self) {
+    // ---- derived data -------------------------------------------------------------------------
+
+    pub(crate) fn summary(&mut self) -> Arc<FileSummary> {
+        if let Some((v, c, s)) = &self.summary_cache {
+            if *v == self.model.files_version && *c == self.custom_ext {
+                return s.clone();
+            }
+        }
+        let s = Arc::new(summarize(&self.model.files, &CustomExts::parse(&self.custom_ext)));
+        self.summary_cache = Some((self.model.files_version, self.custom_ext.clone(), s.clone()));
+        s
+    }
+
+    pub(crate) fn selection(&mut self) -> Sel {
+        let summary = self.summary();
+        derive::selection(&summary, &self.checked, self.include_preview)
+    }
+
+    /// The files a download would save right now, named the way they will be on disk.
+    pub(crate) fn ready_rows(&mut self) -> Arc<Vec<ReadyRow>> {
+        let mut cats: Vec<_> = self.checked.iter().copied().collect();
+        cats.sort();
+        let key = format!("{}|{}|{cats:?}|{}", self.model.files_version, self.custom_ext, self.include_preview);
+        if let Some((k, rows)) = &self.ready_cache {
+            if *k == key {
+                return rows.clone();
+            }
+        }
+        let rows = match &self.model.creator {
+            Some(creator) => {
+                let sel =
+                    Selection { categories: derive::wanted(&self.checked), include_preview: self.include_preview };
+                plan_downloads(
+                    creator,
+                    &self.model.files,
+                    &sel,
+                    &CustomExts::parse(&self.custom_ext),
+                    Path::new(""),
+                    &Hosts::default(),
+                )
+                .into_iter()
+                .map(|j| {
+                    let (post, name) = j.label.rsplit_once('/').unwrap_or(("", j.label.as_str()));
+                    ReadyRow { post: post.to_string(), name: name.to_string(), size: j.expected_size }
+                })
+                .collect()
+            }
+            None => Vec::new(),
+        };
+        let rows = Arc::new(rows);
+        self.ready_cache = Some((key, rows.clone()));
+        rows
+    }
+
+    pub(crate) fn has_folder(&self) -> bool {
+        !self.output.trim().is_empty()
+    }
+
+    /// `{output}/{service}_{creator}`: where this profile's files go.
+    pub(crate) fn run_folder(&self) -> Option<PathBuf> {
+        let c = self.model.creator.as_ref()?;
+        self.has_folder().then(|| PathBuf::from(self.output.trim()).join(creator_dir(c.service.as_str(), &c.id)))
+    }
+
+    pub(crate) fn url_editable(&self) -> bool {
+        matches!(self.model.phase, Phase::Empty | Phase::ScanError | Phase::Ready | Phase::Cancelled | Phase::Finished)
+    }
+
+    pub(crate) fn sizing_running(&self) -> bool {
+        matches!(self.model.sizing, Sizing::Running { .. })
+    }
+
+    /// The bottom bar's primary button, if it has one that Ctrl+Enter may press.
+    fn primary_action(&mut self) -> Option<Action> {
+        match self.model.phase {
+            Phase::Ready => {
+                let sel = self.selection();
+                derive::download_block(self.has_folder(), sel.files).is_none().then_some(Action::Download)
+            }
+            Phase::Downloading => Some(Action::Pause),
+            Phase::Paused => Some(Action::Resume),
+            Phase::ScanError => Some(Action::Scan),
+            Phase::Cancelled => (self.model.remaining() > 0).then_some(Action::Download),
+            Phase::Finished => Some(if self.model.retryable() > 0 { Action::RetryFailed } else { Action::OpenFolder }),
+            Phase::Empty | Phase::Scanning => None,
+        }
+    }
+
+    // ---- events from the session and the pickers ------------------------------------------------
+
+    fn drain(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
         while let Ok(ev) = self.rx.try_recv() {
-            if matches!(ev, UiEvent::ScanFinished { .. }) {
+            let scan_done = matches!(ev, UiEvent::ScanFinished { .. });
+            self.model.apply(ev, now);
+            if scan_done {
+                self.tab = Tab::Files;
+                self.filter = Filter::All;
                 if let Some(dir) = dev::autodownload_dir() {
                     self.output = dir;
-                    self.start_download();
+                    self.perform(Action::Download, ctx);
                 }
             }
-            self.model.apply(ev);
         }
         while let Ok(note) = self.note_rx.try_recv() {
-            self.model.push_log(note);
+            self.model.push_log(Level::Info, note);
         }
         while let Ok((which, path)) = self.picker_rx.try_recv() {
+            self.picker_busy = false;
             let Some(path) = path else { continue };
             match which {
                 Picker::Output => self.output = path.display().to_string(),
-                Picker::CookieFile => self.draft.cookie_file = Some(path),
+                Picker::CookieFile => self.settings.cookie_file = Some(path),
             }
         }
     }
 
-    fn pick(&self, ctx: &egui::Context, which: Picker) {
+    fn pick(&mut self, ctx: &egui::Context, which: Picker) {
+        if self.picker_busy {
+            return;
+        }
+        self.picker_busy = true;
         let (tx, ctx) = (self.picker_tx.clone(), ctx.clone());
+        // The portal call blocks, so it runs on its own thread and the window keeps repainting.
         std::thread::spawn(move || {
-            // Blocking call into the XDG desktop portal, on its own thread.
             let path = match which {
                 Picker::Output => rfd::FileDialog::new().set_title("Choose the output folder").pick_folder(),
                 Picker::CookieFile => rfd::FileDialog::new().set_title("Choose a cookies.txt file").pick_file(),
@@ -108,391 +284,213 @@ impl App {
         });
     }
 
-    fn summary(&mut self) -> FileSummary {
-        let key = (self.model.files_version, self.custom_ext.clone());
-        if let Some((v, c, s)) = &self.summary_cache {
-            if (*v, c) == (key.0, &key.1) {
-                return s.clone();
-            }
-        }
-        let s = summarize(&self.model.files, &CustomExts::parse(&self.custom_ext));
-        self.summary_cache = Some((key.0, key.1, s.clone()));
-        s
-    }
+    // ---- settings persistence --------------------------------------------------------------------
 
-    fn save_settings(&mut self) {
-        self.settings.output_dir = (!self.output.trim().is_empty()).then(|| PathBuf::from(self.output.trim()));
-        self.settings.custom_extensions = self.custom_ext.clone();
-        if let Err(e) = self.settings.save() {
-            self.model.push_log(format!("Could not save settings: {e}"));
-        }
-    }
-
-    fn start_download(&mut self) {
-        self.save_settings();
-        let selection = Selection { categories: self.checked.clone(), include_preview: self.include_preview };
-        self.handle.send(Command::StartDownload {
-            selection,
-            custom_extensions: self.custom_ext.clone(),
-            output: PathBuf::from(self.output.trim()),
-        });
-    }
-
-    // ---- screen sections --------------------------------------------------------------------
-
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("Pawchive Downloader");
-            ui.label(RichText::new(format!("v{}", pawchive_core::VERSION)).weak());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Settings").clicked() {
-                    self.draft = self.settings.clone();
-                    self.settings_open = true;
-                }
-            });
-        });
-    }
-
-    fn step_scan(&mut self, ui: &mut egui::Ui) {
-        ui.strong("1. Creator URL");
-        ui.horizontal(|ui| {
-            let busy = self.model.busy();
-            let edit = ui.add_enabled(
-                !busy,
-                egui::TextEdit::singleline(&mut self.url)
-                    .hint_text("https://pawchive.pw/fanbox/user/1386751")
-                    .desired_width(ui.available_width() - 90.0),
-            );
-            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.add_enabled(!busy, egui::Button::new("Scan")).clicked() || (enter && !busy) {
-                self.handle.send(Command::Scan { url: self.url.clone() });
-            }
-        });
-        match self.model.phase {
-            Phase::Scanning => {
-                let p = self.model.scan_progress;
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(format!("Scanning: {} pages, {} posts, {} files so far", p.pages, p.posts, p.files));
-                    if ui.button("Cancel").clicked() {
-                        self.handle.send(Command::Cancel);
-                    }
-                });
-            }
-            Phase::Ready | Phase::Downloading | Phase::Finished => {
-                if let Some(c) = &self.model.creator {
-                    ui.label(format!(
-                        "{}/{}: {} posts, {} files",
-                        c.service.as_str(),
-                        c.id,
-                        self.model.posts,
-                        self.model.files.len()
-                    ));
-                }
-            }
-            Phase::Idle => {}
-        }
-        if let Some(e) = &self.model.error {
-            ui.colored_label(Color32::from_rgb(220, 90, 90), e);
-        }
-    }
-
-    fn step_types(&mut self, ui: &mut egui::Ui) {
-        ui.strong("2. What to download");
-        if self.model.files.is_empty() {
-            ui.label(RichText::new("Scan a creator to see their files.").weak());
+    /// Write the settings file and tell the session when something it uses changed. Skipped while
+    /// the user is mid-edit (typing, dragging) so a slider drag or a keystroke is not a write.
+    pub(crate) fn sync_settings(&mut self, ctx: &egui::Context, force: bool) {
+        if !force && (ctx.egui_wants_keyboard_input() || ctx.egui_is_using_pointer()) {
             return;
         }
-        let summary = self.summary();
-        let sizing = match self.model.sizing {
-            Sizing::Running { done, total } => Some((done, total)),
-            _ => None,
-        };
-        let enabled = !self.model.busy();
-        ui.add_enabled_ui(enabled, |ui| {
-            egui::Grid::new("types").num_columns(3).striped(true).spacing([18.0, 4.0]).show(ui, |ui| {
-                for cat in Category::ALL {
-                    let stat = summary.per_category.get(&cat);
-                    let count = stat.map_or(0, |s| s.count);
-                    if count == 0 {
-                        continue; // only show types this creator actually has
-                    }
-                    let mut on = self.checked.contains(&cat);
-                    if ui.checkbox(&mut on, cat.label()).changed() {
-                        if on {
-                            self.checked.insert(cat);
-                        } else {
-                            self.checked.remove(&cat);
-                        }
-                    }
-                    ui.label(format!("{count}"));
-                    ui.label(stat.map(|s| size_cell(s, sizing)).unwrap_or_default());
-                    ui.end_row();
-                }
-                // Preview-only files are never presented as downloadable originals.
-                ui.add_enabled(
-                    summary.preview.count > 0,
-                    egui::Checkbox::new(&mut self.include_preview, "Preview only (thumbnail)"),
-                );
-                ui.label(format!("{}", summary.preview.count));
-                ui.label("");
-                ui.end_row();
-            });
-            if summary.preview.count > 0 {
-                ui.label(
-                    RichText::new(
-                        "Pawchive does not hold the full-size files for these. Ticking this saves the small \
-                         thumbnails next to the originals as name.thumb.ext.",
-                    )
-                    .small()
-                    .weak(),
-                );
+        let mut snap = self.settings.clone();
+        snap.output_dir = self.has_folder().then(|| PathBuf::from(self.output.trim()));
+        snap.custom_extensions = self.custom_ext.clone();
+        if snap != self.saved {
+            if let Err(e) = snap.save() {
+                self.model.push_log(Level::Warn, format!("Could not save settings: {e}"));
             }
-            ui.horizontal(|ui| {
-                ui.label("Custom extensions:");
-                ui.add(egui::TextEdit::singleline(&mut self.custom_ext).hint_text("psd, clip").desired_width(160.0));
-                ui.label(RichText::new("matched first, e.g. psd,mp4").small().weak());
-            });
-        });
-        match self.model.sizing {
-            Sizing::Running { done, total } => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(format!(
-                        "Sizing files in the background ({done}/{total}); downloading works without sizes."
-                    ));
-                    if ui.button("Skip sizing").clicked() {
-                        self.handle.send(Command::SkipSizing);
-                    }
-                });
-            }
-            Sizing::Idle if self.model.phase == Phase::Ready => {
-                ui.label(RichText::new("Sizing starts in a moment…").weak());
-            }
-            _ => {}
+            self.saved = snap;
+        }
+        let norm = self.settings.clone().normalized();
+        let changed = (norm.concurrency, norm.delay_ms, &norm.contact, &norm.cookie_file)
+            != (self.sent.concurrency, self.sent.delay_ms, &self.sent.contact, &self.sent.cookie_file);
+        if changed {
+            self.handle.send(Command::SetSettings(norm.clone()));
+            self.sent = norm;
         }
     }
 
-    fn step_output(&mut self, ui: &mut egui::Ui) {
-        ui.strong("3. Output folder");
-        ui.horizontal(|ui| {
-            ui.add_enabled(
-                !self.model.busy(),
-                egui::TextEdit::singleline(&mut self.output)
-                    .hint_text("/path/to/folder")
-                    .desired_width(ui.available_width() - 100.0),
-            );
-            if ui.add_enabled(!self.model.busy(), egui::Button::new("Browse…")).clicked() {
-                self.pick(&ui.ctx().clone(), Picker::Output);
-            }
-        });
-        if !self.output.trim().is_empty() {
-            ui.label(
-                RichText::new(format!("Files go to {}/<service>_<creator>/<date>_<post>_<title>/", self.output.trim()))
-                    .small()
-                    .weak(),
-            );
+    pub(crate) fn reset_settings(&mut self) {
+        let d = Settings::default();
+        self.settings.concurrency = d.concurrency;
+        self.settings.delay_ms = d.delay_ms;
+        if !self.model.phase.busy() {
+            self.settings.contact = d.contact;
+            self.settings.cookie_file = None;
         }
     }
 
-    fn step_download(&mut self, ui: &mut egui::Ui) {
-        ui.strong("4. Download");
-        let summary = self.summary();
-        let selected: usize = Category::ALL
-            .iter()
-            .filter(|c| self.checked.contains(c))
-            .map(|c| summary.per_category.get(c).map_or(0, |s| s.count))
-            .sum::<usize>()
-            + if self.include_preview { summary.preview.count } else { 0 };
-        let can_start = self.model.phase != Phase::Scanning
-            && self.model.phase != Phase::Downloading
-            && !self.model.files.is_empty()
-            && selected > 0
-            && !self.output.trim().is_empty();
-        ui.horizontal(|ui| {
-            if ui.add_enabled(can_start, egui::Button::new(format!("Download {selected} files"))).clicked() {
-                self.start_download();
-            }
-            let downloading = self.model.phase == Phase::Downloading;
-            if self.model.paused {
-                if ui.add_enabled(downloading, egui::Button::new("Resume")).clicked() {
-                    self.model.paused = false;
-                    self.handle.send(Command::Resume);
+    // ---- actions ----------------------------------------------------------------------------------
+
+    pub(crate) fn perform(&mut self, action: Action, ctx: &egui::Context) {
+        match action {
+            Action::Scan => {
+                if !self.url_editable() {
+                    return;
                 }
-            } else if ui.add_enabled(downloading, egui::Button::new("Pause")).clicked() {
-                self.model.paused = true;
-                self.handle.send(Command::Pause);
+                match crate::urlcheck::check(&self.url) {
+                    Ok(creator) => {
+                        self.url_error = None;
+                        let url = format!("https://pawchive.pw/{}/user/{}", creator.service.as_str(), creator.id);
+                        self.handle.send(Command::Scan { url });
+                    }
+                    Err(e) => self.url_error = Some(e),
+                }
             }
-            if ui.add_enabled(downloading, egui::Button::new("Cancel")).clicked() {
+            Action::CancelScan | Action::Cancel => {
+                self.model.note_cancel();
                 self.handle.send(Command::Cancel);
             }
-            if !can_start && self.model.phase == Phase::Ready {
-                let why = if selected == 0 { "tick something above" } else { "choose an output folder" };
-                ui.label(RichText::new(why).weak());
-            }
-        });
-        if let Some(n) = &self.model.notice {
-            ui.colored_label(Color32::from_rgb(230, 170, 60), n);
-        }
-        let total = self.model.rows.len();
-        if total == 0 {
-            return;
-        }
-        let finished = self.model.finished_rows();
-        let frac = finished as f32 / total as f32;
-        let text = format!(
-            "{finished}/{total} files, {}{}",
-            human_size(self.model.bytes_done()),
-            if self.model.paused { " (paused)" } else { "" }
-        );
-        ui.add(egui::ProgressBar::new(frac).text(text).desired_height(18.0));
-        let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-        egui::ScrollArea::vertical().id_salt("rows").max_height(210.0).auto_shrink([false, true]).show_rows(
-            ui,
-            row_h,
-            total,
-            |ui, range| {
-                for i in range {
-                    let r = &self.model.rows[i];
-                    ui.horizontal(|ui| {
-                        let (text, color) = match &r.state {
-                            RowState::Queued => ("queued".to_string(), Color32::GRAY),
-                            RowState::Active => (progress_text(r.done, r.total), Color32::LIGHT_BLUE),
-                            RowState::Retrying(why) => (format!("retrying ({why})"), Color32::from_rgb(230, 170, 60)),
-                            RowState::Done => ("done".into(), Color32::from_rgb(110, 200, 120)),
-                            RowState::Skipped => ("skipped (exists)".into(), Color32::GRAY),
-                            RowState::Failed { error, .. } => {
-                                (format!("failed: {error}"), Color32::from_rgb(220, 90, 90))
-                            }
-                            RowState::Cancelled => ("cancelled".into(), Color32::GRAY),
-                        };
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(210.0, row_h),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| ui.add(egui::Label::new(RichText::new(text).color(color)).truncate()),
-                        );
-                        ui.add(egui::Label::new(&r.label).truncate());
-                    });
+            Action::Download => {
+                if !matches!(self.model.phase, Phase::Ready | Phase::Cancelled) {
+                    return;
                 }
-            },
-        );
-    }
-
-    fn step_log(&mut self, ui: &mut egui::Ui) {
-        ui.strong("5. Log and failures");
-        let failed: Vec<(usize, String, String)> = self
-            .model
-            .failed_rows()
-            .map(|(i, r)| {
-                (
-                    i,
-                    r.label.clone(),
-                    match &r.state {
-                        RowState::Failed { error, .. } => error.clone(),
-                        _ => String::new(),
+                self.sync_settings(ctx, true);
+                self.handle.send(Command::StartDownload {
+                    selection: Selection {
+                        categories: derive::wanted(&self.checked),
+                        include_preview: self.include_preview,
                     },
-                )
-            })
-            .collect();
-        if !failed.is_empty() {
-            ui.horizontal(|ui| {
-                ui.colored_label(Color32::from_rgb(220, 90, 90), format!("{} files failed", failed.len()));
-                let idle = self.model.phase != Phase::Downloading;
-                if ui.add_enabled(idle, egui::Button::new("Retry failed")).clicked() {
+                    custom_extensions: self.custom_ext.clone(),
+                    output: PathBuf::from(self.output.trim()),
+                });
+            }
+            Action::Pause => {
+                self.model.note_pause();
+                self.handle.send(Command::Pause);
+            }
+            Action::Resume => {
+                self.model.note_resume();
+                self.handle.send(Command::Resume);
+            }
+            Action::RetryFailed => {
+                let ids: Vec<usize> = self
+                    .model
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| matches!(r.state, RowState::Failed { permanent: false, .. }))
+                    .map(|(i, _)| i)
+                    .collect();
+                if !ids.is_empty() && matches!(self.model.phase, Phase::Finished | Phase::Cancelled) {
+                    self.model.begin_retry(&ids);
                     self.handle.send(Command::RetryFailed);
                 }
-            });
-            egui::ScrollArea::vertical().id_salt("failed").max_height(90.0).auto_shrink([false, true]).show(ui, |ui| {
-                for (_, label, err) in &failed {
-                    ui.label(RichText::new(format!("{label} — {err}")).small());
+            }
+            Action::RetryOne(i) => {
+                let retryable = self
+                    .model
+                    .rows
+                    .get(i)
+                    .is_some_and(|r| matches!(r.state, RowState::Failed { permanent: false, .. }));
+                if retryable && matches!(self.model.phase, Phase::Finished | Phase::Cancelled) {
+                    self.model.begin_retry(&[i]);
+                    self.handle.send(Command::RetryJobs(vec![i as u64]));
                 }
-            });
+            }
+            Action::OpenFolder => self.open_folder(ctx),
+            Action::CopyPath => {
+                if let Some(p) =
+                    self.run_folder().or_else(|| self.has_folder().then(|| PathBuf::from(self.output.trim())))
+                {
+                    ctx.copy_text(p.display().to_string());
+                }
+            }
+            Action::Browse => {
+                if !self.model.phase.busy() {
+                    self.pick(ctx, Picker::Output);
+                }
+            }
+            Action::ChooseCookie => {
+                if !self.model.phase.busy() {
+                    self.pick(ctx, Picker::CookieFile);
+                }
+            }
+            Action::SkipSizing => self.handle.send(Command::SkipSizing),
+            Action::CopyLog => {
+                let text: String =
+                    self.model.log.iter().map(|l| format!("{} {}\n", crate::format::hms_utc(l.unix), l.text)).collect();
+                ctx.copy_text(text);
+            }
+            Action::OpenSettings => self.settings_open = true,
         }
-        egui::ScrollArea::vertical()
-            .id_salt("log")
-            .max_height(130.0)
-            .auto_shrink([false, true])
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                for line in &self.model.log {
-                    ui.label(RichText::new(line).small().monospace());
-                }
-            });
     }
 
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.settings_open;
-        let mut apply = false;
-        egui::Window::new("Settings").min_width(460.0).open(&mut open).collapsible(false).resizable(false).show(
-            ctx,
-            |ui| {
-                egui::Grid::new("settings").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
-                    ui.label("Concurrent downloads");
-                    ui.add(egui::Slider::new(&mut self.draft.concurrency, 1..=MAX_CONCURRENCY));
-                    ui.end_row();
-                    ui.label("Minimum delay between requests");
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut self.draft.delay_ms).range(MIN_DELAY_MS..=60_000).suffix(" ms"),
-                        );
-                        ui.label(RichText::new("the site asks for at most 1 request/second").small().weak());
-                    });
-                    ui.end_row();
-                    ui.label("Contact (added to the user agent)");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.draft.contact)
-                            .hint_text("you@example.org")
-                            .desired_width(260.0),
-                    );
-                    ui.end_row();
-                    ui.label("Cookie file (optional)");
-                    ui.horizontal(|ui| {
-                        let shown = self
-                            .draft
-                            .cookie_file
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| "none".into());
-                        ui.label(shown);
-                        if ui.button("Choose…").clicked() {
-                            self.pick(ctx, Picker::CookieFile);
-                        }
-                        if ui.add_enabled(self.draft.cookie_file.is_some(), egui::Button::new("Clear")).clicked() {
-                            self.draft.cookie_file = None;
-                        }
-                    });
-                    ui.end_row();
+    /// `xdg-open` on the profile folder (or the output folder before anything is saved). If it
+    /// cannot start, the path goes to the clipboard instead.
+    fn open_folder(&mut self, ctx: &egui::Context) {
+        let target = match self.run_folder() {
+            Some(p) if p.exists() => p,
+            _ => PathBuf::from(self.output.trim()),
+        };
+        match std::process::Command::new("xdg-open").arg(&target).spawn() {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
                 });
-                ui.label(
-                RichText::new(
-                    "A Netscape cookies.txt is read into memory only. Its contents are never logged, shown or saved; \
-                     only the file path is remembered. Pawchive works without it.",
-                )
-                .small()
-                .weak(),
-            );
-                ui.label(
-                    RichText::new(format!("User agent: {}", self.draft.clone().normalized().user_agent()))
-                        .small()
-                        .monospace(),
-                );
-                ui.add_space(6.0);
-                if ui.button("Apply").clicked() {
-                    apply = true;
-                }
-            },
-        );
-        if apply {
-            self.settings = std::mem::take(&mut self.draft).normalized();
-            self.save_settings();
-            self.handle.send(Command::SetSettings(self.settings.clone()));
-            open = false;
+            }
+            Err(e) => {
+                ctx.copy_text(target.display().to_string());
+                self.model
+                    .push_log(Level::Warn, format!("Could not open the folder ({e}); its path was copied instead"));
+            }
         }
-        self.settings_open = open;
+    }
+
+    // ---- keyboard ---------------------------------------------------------------------------------
+
+    /// `ui-spec` section 7. Consumed before any widget draws, so they work from a text field too.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        let hit = |key: Key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, key)));
+        let (focus_url, browse, primary, pause, settings, quit) =
+            (hit(Key::L), hit(Key::O), hit(Key::Enter), hit(Key::P), hit(Key::Comma), hit(Key::Q));
+        if self.settings_open || self.quit_open {
+            return;
+        }
+        if focus_url {
+            self.focus_url = true;
+        }
+        if browse {
+            self.perform(Action::Browse, ctx);
+        }
+        if primary {
+            if let Some(a) = self.primary_action() {
+                self.perform(a, ctx);
+            }
+        }
+        if pause {
+            match self.model.phase {
+                Phase::Downloading => self.perform(Action::Pause, ctx),
+                Phase::Paused => self.perform(Action::Resume, ctx),
+                _ => {}
+            }
+        }
+        if settings {
+            self.settings_open = true;
+        }
+        if quit {
+            self.request_quit(ctx);
+        }
+    }
+
+    fn request_quit(&mut self, ctx: &egui::Context) {
+        if self.model.phase.running() {
+            self.quit_open = true;
+        } else {
+            self.quit_now = true;
+            self.sync_settings(ctx, true);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    pub(crate) fn confirm_quit(&mut self, ctx: &egui::Context) {
+        self.quit_now = true;
+        self.sync_settings(ctx, true);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn dev_hooks(&mut self, ctx: &egui::Context) {
-        if dev::screenshots_enabled() && ctx.input(|i| i.key_pressed(egui::Key::F12)) {
+        if dev::screenshots_enabled() && ctx.input(|i| i.key_pressed(Key::F12)) {
             dev::request_screenshot(ctx, self.note_tx.clone());
         }
         if let Some(secs) = dev::shot_after_secs() {
@@ -500,44 +498,84 @@ impl App {
                 self.shot_done = true;
                 dev::request_screenshot(ctx, self.note_tx.clone());
             } else if !self.shot_done {
-                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                ctx.request_repaint_after(Duration::from_millis(200));
             }
         }
     }
 }
 
-fn progress_text(done: u64, total: Option<u64>) -> String {
-    match total {
-        Some(t) if t > 0 => format!("{:.0}%  {} / {}", done as f64 * 100.0 / t as f64, human_size(done), human_size(t)),
-        _ => human_size(done),
-    }
-}
-
 impl eframe::App for App {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain();
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let now = Instant::now();
+        self.drain(ctx);
+        self.model.tick(now);
+        if self.model.take_finished() {
+            // Once, when a run ends with failures; never otherwise, so it cannot steal focus mid-work.
+            if self.model.phase == Phase::Finished && self.model.failed() > 0 {
+                self.tab = Tab::Problems;
+            }
+            if !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Informational,
+                ));
+            }
+        }
+        let title = derive::window_title(&self.model, now);
+        if title != self.last_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_title = title;
+        }
+        // Spinner, elapsed clock and countdown must advance with no input; idle costs nothing.
+        if self.model.phase.busy() || self.sizing_running() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.model.phase.running() && !self.quit_now {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.quit_open = true;
+        }
+        self.sync_settings(ctx, false);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let pal = Pal::new(ctx.theme().into());
         self.dev_hooks(&ctx);
-        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("page").show(ui, |ui| {
-                ui.add_space(4.0);
-                self.step_scan(ui);
-                ui.separator();
-                self.step_types(ui);
-                ui.separator();
-                self.step_output(ui);
-                ui.separator();
-                self.step_download(ui);
-                ui.separator();
-                self.step_log(ui);
-            });
+        self.shortcuts(&ctx);
+        let mut acts: Vec<Action> = Vec::new();
+        let panel =
+            |l, r, t, b| Frame::new().fill(pal.bg).inner_margin(Margin { left: l, right: r, top: t, bottom: b });
+        let (m, s) = (S4 as i8, 10);
+
+        egui::Panel::top("title").frame(panel(m, m, 12, s)).show(ui, |ui| self.titlebar(ui, &pal, &mut acts));
+        egui::Panel::bottom("action").frame(panel(m, m, s, s)).show(ui, |ui| self.action_bar(ui, &pal, &mut acts));
+        egui::Panel::left("setup").exact_size(LEFT_W).resizable(false).frame(panel(m, m, 14, 0)).show(ui, |ui| {
+            self.left(ui, &pal, &mut acts);
         });
+        egui::CentralPanel::default().frame(panel(m, m, 14, 12)).show(ui, |ui| self.centre(ui, &pal, &mut acts));
+
         if self.settings_open {
-            self.settings_window(&ctx);
+            self.settings_modal(&ctx, &pal);
         }
+        if self.quit_open {
+            self.quit_modal(&ctx, &pal);
+        }
+        for a in acts {
+            self.perform(a, &ctx);
+        }
+        if std::mem::take(&mut self.focus_url) {
+            crate::view::focus_url(&ctx, self.url.chars().count());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_selection_leaves_other_unticked() {
+        let c = derive::default_checked();
+        assert!(c.contains(&Category::Image) && c.contains(&Category::Video));
+        assert!(!c.contains(&Category::Other));
     }
 }

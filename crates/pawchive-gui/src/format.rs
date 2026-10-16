@@ -1,8 +1,8 @@
 //! Small display helpers.
 
-use pawchive_core::plan::Stat;
+use std::time::Duration;
 
-/// `1536` -> `"1.5 kB"`; decimal units, one decimal above bytes.
+/// `1536` -> `"1.5 kB"`. SI units (1 MB = 1,000,000 B), one decimal above bytes.
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
     if bytes < 1000 {
@@ -17,20 +17,47 @@ pub fn human_size(bytes: u64) -> String {
     format!("{v:.1} {}", UNITS[u])
 }
 
-/// Total-size cell for a type row: exact when every file is sized, otherwise a lower bound with
-/// the sizing progress ("≥ 1.2 GB (sizing 340/612)").
-pub fn size_cell(stat: &Stat, sizing: Option<(usize, usize)>) -> String {
-    if stat.count == 0 {
-        return String::new();
+/// `4047` -> `"4,047"`.
+pub fn comma(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
     }
-    if stat.unsized_files == 0 {
-        return human_size(stat.bytes);
+    out
+}
+
+/// `74 s` -> `"1:14"`, `3725 s` -> `"1:02:05"`.
+pub fn clock(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
     }
-    match sizing {
-        Some((done, total)) => format!("≥ {} (sizing {done}/{total})", human_size(stat.bytes)),
-        None if stat.bytes == 0 => format!("unknown ({} unsized)", stat.unsized_files),
-        None => format!("≥ {} ({} unsized)", human_size(stat.bytes), stat.unsized_files),
+}
+
+/// `"about 3 min left"`, from remaining seconds.
+pub fn eta(secs: u64) -> String {
+    match secs {
+        0..=59 => "less than a minute left".into(),
+        60..=5399 => format!("about {} min left", secs.div_ceil(60)),
+        _ => format!("about {:.1} h left", secs as f64 / 3600.0),
     }
+}
+
+/// `HH:MM:SS` (UTC) for a unix timestamp.
+pub fn hms_utc(unix_secs: u64) -> String {
+    let d = unix_secs % 86_400;
+    format!("{:02}:{:02}:{:02}", d / 3600, d / 60 % 60, d % 60)
+}
+
+/// Last path component, for "Files go in …/pawchive/fanbox_1386751/".
+pub fn last_component(path: &str) -> &str {
+    path.trim_end_matches('/').rsplit('/').next().unwrap_or(path)
 }
 
 #[cfg(test)]
@@ -47,12 +74,17 @@ mod tests {
     }
 
     #[test]
-    fn size_cells() {
-        let s = |count, bytes, unsized_files| Stat { count, bytes, unsized_files };
-        assert_eq!(size_cell(&s(0, 0, 0), None), "");
-        assert_eq!(size_cell(&s(3, 3000, 0), Some((3, 3))), "3.0 kB");
-        assert_eq!(size_cell(&s(612, 1_200_000_000, 272), Some((340, 612))), "≥ 1.2 GB (sizing 340/612)");
-        assert_eq!(size_cell(&s(5, 0, 5), None), "unknown (5 unsized)");
-        assert_eq!(size_cell(&s(5, 2_000, 1), None), "≥ 2.0 kB (1 unsized)");
+    fn numbers_and_times() {
+        assert_eq!(comma(0), "0");
+        assert_eq!(comma(999), "999");
+        assert_eq!(comma(4047), "4,047");
+        assert_eq!(comma(1_234_567), "1,234,567");
+        assert_eq!(clock(Duration::from_secs(14)), "0:14");
+        assert_eq!(clock(Duration::from_secs(724)), "12:04");
+        assert_eq!(clock(Duration::from_secs(3725)), "1:02:05");
+        assert_eq!(eta(30), "less than a minute left");
+        assert_eq!(eta(170), "about 3 min left");
+        assert_eq!(hms_utc(3 * 3600 + 4 * 60 + 5), "03:04:05");
+        assert_eq!(last_component("/home/you/Downloads/pawchive/"), "pawchive");
     }
 }
