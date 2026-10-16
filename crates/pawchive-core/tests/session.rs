@@ -176,8 +176,25 @@ fn files_that_404_when_sized_are_not_offered_for_download() {
     let mock = rt.block_on(gone_site());
     let (handle, rx) = start(&mock.base);
     handle.send(Command::Scan { url: "https://pawchive.pw/fanbox/user/119251".into() });
-    wait_for(&rx, |e| matches!(e, UiEvent::ScanFinished { .. }).then_some(()));
-    wait_for(&rx, |e| matches!(e, UiEvent::SizingFinished { skipped: false }).then_some(()));
+    let files = wait_for(&rx, |e| match e {
+        UiEvent::ScanFinished { files, .. } => Some(files),
+        _ => None,
+    });
+    let to_probe = files.iter().filter(|f| !f.preview_only).count();
+    assert!(to_probe > 0);
+    // Not just a Log line: the front end is told which files are gone.
+    let mut missing = std::collections::HashSet::new();
+    wait_for(&rx, |e| match e {
+        UiEvent::FileMissing { index } => {
+            assert!(!files[index].preview_only);
+            missing.insert(index);
+            None
+        }
+        UiEvent::FileSized { .. } => panic!("a 404 must not count as sized"),
+        UiEvent::SizingFinished { skipped: false } => Some(()),
+        _ => None,
+    });
+    assert_eq!(missing.len(), to_probe, "every 404'd probe is reported");
 
     let out = TempDir::new().unwrap();
     handle.send(Command::StartDownload {

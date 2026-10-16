@@ -179,6 +179,11 @@ impl Model {
         self.count(|s| matches!(s, RowState::Done | RowState::Skipped))
     }
 
+    /// Scanned files the server answered 404 for when sized: not downloadable.
+    pub fn missing(&self) -> usize {
+        self.files.iter().filter(|f| f.missing).count()
+    }
+
     pub fn failed(&self) -> usize {
         self.count(|s| matches!(s, RowState::Failed { .. }))
     }
@@ -420,10 +425,17 @@ impl Model {
                     self.files_version += 1;
                 }
             }
+            UiEvent::FileMissing { index } => {
+                if let Some(f) = self.files.get_mut(index) {
+                    f.missing = true;
+                    self.files_version += 1;
+                }
+            }
             UiEvent::SizingFinished { skipped } => {
                 self.sizing = Sizing::Finished { skipped };
                 let sized = self.files.iter().filter(|f| !f.preview_only && f.size.is_some()).count();
                 let all = self.files.iter().filter(|f| !f.preview_only).count();
+                let gone = self.missing();
                 let bytes: u64 = self.files.iter().filter(|f| !f.preview_only).filter_map(|f| f.size).sum();
                 self.push_log(
                     Level::Info,
@@ -433,6 +445,13 @@ impl Model {
                         format!("Sizing finished: {sized} of {all} files, {} total", human_size(bytes))
                     },
                 );
+                if gone > 0 {
+                    // One line, not one per file: a creator can have thousands.
+                    self.push_log(
+                        Level::Warn,
+                        format!("{gone} of {all} files are not on the Pawchive server any more (HTTP 404) and will be left out"),
+                    );
+                }
             }
             UiEvent::DownloadStarted { jobs } => {
                 self.phase = Phase::Downloading;
@@ -794,6 +813,7 @@ mod tests {
             node: None,
             size: None,
             content_type: None,
+            missing: false,
         };
         m.apply(UiEvent::ScanFinished { creator: creator(), posts: 1, files: vec![f("a.jpg"), f("b.jpg")] }, now);
         assert_eq!(m.sizing, Sizing::Running { done: 0, total: 2 });

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Frame, Key, KeyboardShortcut, Margin, Modifiers};
 use pawchive_core::api::Hosts;
 use pawchive_core::classify::{Category, CustomExts};
-use pawchive_core::names::creator_dir;
+use pawchive_core::names::{creator_dir, post_dir};
 use pawchive_core::plan::{plan_downloads, summarize, FileSummary, Selection};
 use pawchive_core::session::{Command, SessionHandle, UiEvent};
 use pawchive_core::settings::Settings;
@@ -68,6 +68,8 @@ pub struct ReadyRow {
     pub post: String,
     pub name: String,
     pub size: Option<u64>,
+    /// The server answered 404 for this file when it was sized: listed, but it will not be saved.
+    pub missing: bool,
 }
 
 pub struct App {
@@ -163,9 +165,21 @@ impl App {
         s
     }
 
+    /// Sizes may still arrive or were given up on (Skip): totals are lower bounds, drawn `≥`.
+    /// After a normal finish they are final, even if a few probes failed.
+    pub(crate) fn sizes_are_lower_bounds(&self) -> bool {
+        matches!(self.model.sizing, Sizing::Running { .. } | Sizing::Finished { skipped: true })
+    }
+
     pub(crate) fn selection(&mut self) -> Sel {
         let summary = self.summary();
-        derive::selection(&summary, &self.checked, self.include_preview)
+        derive::selection(&summary, &self.checked, self.include_preview, self.sizes_are_lower_bounds())
+    }
+
+    /// Every full-size file the scan found is gone from the server (and none is a custom match).
+    pub(crate) fn all_gone(&mut self) -> bool {
+        let s = self.summary();
+        s.missing > 0 && s.per_category.is_empty()
     }
 
     /// The files a download would save right now, named the way they will be on disk.
@@ -182,7 +196,7 @@ impl App {
             Some(creator) => {
                 let sel =
                     Selection { categories: derive::wanted(&self.checked), include_preview: self.include_preview };
-                plan_downloads(
+                let mut rows: Vec<ReadyRow> = plan_downloads(
                     creator,
                     &self.model.files,
                     &sel,
@@ -193,9 +207,17 @@ impl App {
                 .into_iter()
                 .map(|j| {
                     let (post, name) = j.label.rsplit_once('/').unwrap_or(("", j.label.as_str()));
-                    ReadyRow { post: post.to_string(), name: name.to_string(), size: j.expected_size }
+                    ReadyRow { post: post.to_string(), name: name.to_string(), size: j.expected_size, missing: false }
                 })
-                .collect()
+                .collect();
+                // Gone files stay visible, marked, after the ones that will be saved.
+                rows.extend(self.model.files.iter().filter(|f| f.missing).map(|f| ReadyRow {
+                    post: post_dir(f.post_published.as_deref(), &f.post_id, &f.post_title),
+                    name: f.name.clone(),
+                    size: None,
+                    missing: true,
+                }));
+                rows
             }
             None => Vec::new(),
         };
@@ -227,7 +249,9 @@ impl App {
         match self.model.phase {
             Phase::Ready => {
                 let sel = self.selection();
-                derive::download_block(self.has_folder(), sel.files).is_none().then_some(Action::Download)
+                derive::download_block(self.has_folder(), sel.files, self.all_gone())
+                    .is_none()
+                    .then_some(Action::Download)
             }
             Phase::Downloading => Some(Action::Pause),
             Phase::Paused => Some(Action::Resume),

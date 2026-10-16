@@ -168,8 +168,9 @@ impl App {
         let summary = self.summary();
         let editable = phase == Phase::Ready;
         let w = ui.available_width();
-        let widths = vec![128.0, (w - 128.0 - 52.0 - 88.0).max(40.0), 52.0, 88.0];
+        let widths = vec![112.0, (w - 112.0 - 48.0 - 84.0).max(40.0), 48.0, 84.0];
         let probing = self.sizing_running();
+        let lower_bound = self.sizes_are_lower_bounds();
         ui.spacing_mut().item_spacing.y = 0.0;
 
         let head = Cols::new(ui, 20.0, widths.clone());
@@ -192,14 +193,24 @@ impl App {
                 ui.add_enabled_ui(editable && has, |ui| changed = ui.checkbox(&mut on, cat.label()).changed());
             });
             c.put(ui, 1, false, |ui| {
-                ui.add(egui::Label::new(dim(p, exts)).truncate());
+                ui.add(egui::Label::new(dim(p, exts).size(T_SMALL - 0.5)).truncate());
             });
             c.put(ui, 2, true, |ui| {
                 // The session reports totals while scanning, not types, so counts wait for the end.
                 let t = if live { "…".into() } else { comma(stat.count) };
                 ui.label(num(t).color(if has || live { p.ink } else { p.ink_dim }));
             });
-            c.put(ui, 3, true, |ui| size_cell(ui, p, live, has, stat.bytes, stat.unsized_files > 0, probing));
+            c.put(ui, 3, true, |ui| {
+                size_cell(
+                    ui,
+                    p,
+                    live,
+                    has,
+                    stat.bytes,
+                    stat.unsized_files > 0 && (lower_bound || stat.bytes == 0),
+                    probing,
+                )
+            });
             if changed {
                 if on {
                     self.checked.insert(cat);
@@ -228,7 +239,7 @@ impl App {
         let pc = summary.preview.count;
         let mut pv = self.include_preview && pc > 0;
         let mut changed = false;
-        let c = Cols::new(ui, ROW_H + 2.0, vec![w - 52.0 - 88.0, 52.0, 88.0]);
+        let c = Cols::new(ui, ROW_H + 2.0, vec![w - 48.0 - 84.0, 48.0, 84.0]);
         c.put(ui, 0, false, |ui| {
             ui.add_enabled_ui(editable && pc > 0, |ui| {
                 changed = ui.checkbox(&mut pv, "Preview only (thumbnail)").changed();
@@ -267,7 +278,11 @@ impl App {
         if !live && !CustomExts::parse(&self.custom_ext).is_empty() {
             let line = match summary.per_category.get(&Category::Custom) {
                 Some(s) if s.count > 0 => {
-                    format!("Matches {} files · {}", comma(s.count), size_label(s.bytes, s.unsized_files > 0))
+                    format!(
+                        "Matches {} files · {}",
+                        comma(s.count),
+                        size_label(s.bytes, lower_bound && s.unsized_files > 0)
+                    )
                 }
                 _ => "No files with these extensions.".to_string(),
             };
@@ -447,14 +462,39 @@ impl App {
                     line.push_str(" + thumbnails (size not measured)");
                 }
                 let downloadable: usize = summary.per_category.values().map(|s| s.count).sum();
-                card(ui, p, p.ok, |ui| {
-                    card_head(ui, p, Lead::Glyph("✓", p.ok), &title, None);
+                let gone = summary.missing;
+                let finished_unsized =
+                    !self.sizes_are_lower_bounds() && sel.unsized_files > 0 && !self.sizing_running();
+                // The card is green only while it has nothing to warn about.
+                let stripe = if gone > 0 { p.warn } else { p.ok };
+                card(ui, p, stripe, |ui| {
+                    card_head(ui, p, Lead::Glyph(if gone > 0 { "⚠" } else { "✓" }, stripe), &title, None);
                     if all == 0 {
                         ui.label("This profile has no downloadable files, or the id doesn't exist.");
                     } else {
                         ui.label(line);
+                        if gone > 0 {
+                            // The 404 on the size probe is as permanent as a 404 on download.
+                            ui.add(
+                                egui::Label::new(RichText::new(format!(
+                                    "Pawchive no longer has {} of {} files (not found, HTTP 404). They can't be saved.",
+                                    comma(gone),
+                                    comma(all)
+                                )))
+                                .wrap(),
+                            );
+                        }
+                        if finished_unsized {
+                            ui.label(dim(
+                                p,
+                                format!(
+                                    "{} files couldn't be measured, so the size above leaves them out.",
+                                    comma(sel.unsized_files)
+                                ),
+                            ));
+                        }
                         if summary.preview.count > downloadable {
-                            ui.horizontal(|ui| {
+                            ui.horizontal_top(|ui| {
                                 ui.label(RichText::new("ⓘ").color(p.accent));
                                 ui.add(
                                     egui::Label::new(dim(
@@ -466,9 +506,11 @@ impl App {
                                             comma(downloadable)
                                         ),
                                     ))
-                                    .truncate(),
+                                    .wrap(),
                                 );
                             });
+                        } else if gone > 0 {
+                            ui.label(dim(p, "Files marked \"Not on the server\" are left out of the download."));
                         } else {
                             ui.label(dim(
                                 p,
@@ -517,7 +559,7 @@ impl App {
             Phase::Paused => {
                 let partial = m.partial();
                 card(ui, p, p.warn, |ui| {
-                    card_head(ui, p, Lead::Glyph("⏸", p.warn), "Paused", Some(counter));
+                    card_head(ui, p, Lead::Icon(Glyph::Pause, p.warn), "Paused", Some(counter));
                     bar(ui, m.fraction(), p.warn);
                     ui.label(format!(
                         "{} saved. {} partial {} kept.",
@@ -739,7 +781,7 @@ impl App {
     pub(crate) fn action_bar(&mut self, ui: &mut Ui, p: &Pal, acts: &mut Vec<Action>) {
         let sel = self.selection();
         let phase = self.model.phase;
-        let block = derive::download_block(self.has_folder(), sel.files);
+        let block = derive::download_block(self.has_folder(), sel.files, self.all_gone());
         let retryable = self.model.retryable();
         let remaining = self.model.remaining();
         let folder_exists =
@@ -867,6 +909,7 @@ fn size_cell(ui: &mut Ui, p: &Pal, live: bool, has: bool, bytes: u64, partial: b
 enum Lead {
     Spinner,
     Glyph(&'static str, Color32),
+    Icon(Glyph, Color32),
 }
 
 /// Headline row of a status card: spinner or glyph, 16 pt strong title, counter on the right.
@@ -879,6 +922,7 @@ fn card_head(ui: &mut Ui, p: &Pal, lead: Lead, title: &str, right: Option<String
             Lead::Glyph(g, c) => {
                 ui.label(RichText::new(g).color(c).size(T_CARD));
             }
+            Lead::Icon(g, c) => draw_icon(ui, &g, c, T_CARD),
         }
         ui.label(RichText::new(title).size(T_CARD).strong());
         if let Some(r) = right {
@@ -941,8 +985,9 @@ struct TableCols {
 
 impl TableCols {
     fn new(w: f32) -> Self {
-        let show_post = w >= 600.0;
-        let (stat, size, prog, post) = (30.0, 104.0, 150.0, if show_post { 164.0 } else { 0.0 });
+        let show_post = w >= 620.0;
+        // Size fits "999.9 MB / 999.9 MB" in the monospace face; Progress fits bar + "Stopped at 66%".
+        let (stat, size, prog, post) = (30.0, 150.0, 150.0, if show_post { 140.0 } else { 0.0 });
         let name = (w - stat - size - prog - post - 14.0).max(120.0);
         TableCols { widths: vec![stat, name, post, prog, size], show_post }
     }
@@ -995,21 +1040,80 @@ fn table(ui: &mut Ui, p: &Pal, ready: bool, count: usize, mut row: impl FnMut(&m
         });
 }
 
-fn glyph_cell(ui: &mut Ui, cols: &Cols, g: &str, c: Color32) {
+/// A status icon. Pause and retry are drawn with the painter: the bundled fonts have no glyph for
+/// them (they showed as `▯`), and a drawn shape cannot go missing on someone else's machine.
+#[derive(Clone, Copy)]
+enum Glyph {
+    Text(&'static str),
+    Pause,
+    Retry,
+}
+
+fn draw_icon(ui: &mut Ui, g: &Glyph, c: Color32, size: f32) {
+    match g {
+        Glyph::Text(t) => {
+            ui.label(RichText::new(*t).color(c).size(size));
+        }
+        Glyph::Pause => {
+            let (r, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+            let (bar, gap) = (size * 0.24, size * 0.18);
+            let x0 = r.center().x - bar - gap / 2.0;
+            for x in [x0, x0 + bar + gap] {
+                let b = Rect::from_min_size(egui::pos2(x, r.top() + size * 0.14), vec2(bar, size * 0.72));
+                ui.painter().rect_filled(b, CornerRadius::same(1), c);
+            }
+        }
+        Glyph::Retry => {
+            // A three-quarter circle with an arrow head: "again".
+            let (r, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+            let (ctr, rad) = (r.center(), size * 0.36);
+            let at = |a: f32| ctr + vec2(a.cos(), a.sin()) * rad;
+            let (start, end) = (-0.3_f32, 4.4_f32);
+            let pts: Vec<_> = (0..=20).map(|i| at(start + (end - start) * i as f32 / 20.0)).collect();
+            let st = Stroke::new((size * 0.12).max(1.2), c);
+            ui.painter().add(egui::Shape::line(pts, st));
+            let tip = at(end);
+            let dir = vec2((end + std::f32::consts::FRAC_PI_2).cos(), (end + std::f32::consts::FRAC_PI_2).sin());
+            let side = vec2(-dir.y, dir.x);
+            let h = size * 0.26;
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![tip + dir * h, tip - dir * (h * 0.2) + side * h * 0.8, tip - dir * (h * 0.2) - side * h * 0.8],
+                c,
+                Stroke::NONE,
+            ));
+        }
+    }
+}
+
+fn glyph_cell(ui: &mut Ui, cols: &Cols, g: &Glyph, c: Color32) {
     cols.put(ui, 0, false, |ui| {
         ui.add_space(4.0);
-        ui.label(RichText::new(g).color(c).strong());
+        match g {
+            Glyph::Text(t) => {
+                ui.label(RichText::new(*t).color(c).strong());
+            }
+            other => draw_icon(ui, other, c, 14.0),
+        }
     });
 }
 
 fn ready_row(ui: &mut Ui, p: &Pal, cols: &Cols, r: &ReadyRow, _zebra: bool) {
-    glyph_cell(ui, cols, "•", p.ink_dim);
+    if r.missing {
+        glyph_cell(ui, cols, &Glyph::Text("×"), p.warn);
+    } else {
+        glyph_cell(ui, cols, &Glyph::Text("•"), p.ink_dim);
+    }
     cols.put(ui, 1, false, |ui| {
-        ui.add(egui::Label::new(&r.name).truncate());
+        let t = RichText::new(&r.name);
+        ui.add(egui::Label::new(if r.missing { t.color(p.ink_dim) } else { t }).truncate());
     });
     put_post(ui, p, cols, &r.post);
     cols.put(ui, 3, false, |ui| {
-        ui.label(dim(p, "Ready"));
+        if r.missing {
+            ui.label(RichText::new("Not on the server").size(T_SMALL).color(p.warn));
+        } else {
+            ui.label(dim(p, "Ready"));
+        }
     });
     cols.put(ui, 4, true, |ui| {
         ui.label(num(r.size.map_or("—".to_string(), human_size)).color(p.ink_dim));
@@ -1017,7 +1121,7 @@ fn ready_row(ui: &mut Ui, p: &Pal, cols: &Cols, r: &ReadyRow, _zebra: bool) {
 }
 
 fn put_post(ui: &mut Ui, p: &Pal, cols: &Cols, post: &str) {
-    if cols.rect().width() >= 600.0 {
+    if cols.rect().width() >= 620.0 {
         cols.put(ui, 2, false, |ui| {
             ui.add(egui::Label::new(dim(p, post)).truncate());
         });
@@ -1026,7 +1130,7 @@ fn put_post(ui: &mut Ui, p: &Pal, cols: &Cols, post: &str) {
 
 /// How one run row looks: glyph, status text and colours, optional mini bar.
 struct RowLook {
-    glyph: &'static str,
+    glyph: Glyph,
     color: Color32,
     text: String,
     bar: Option<(f32, Color32)>,
@@ -1037,37 +1141,55 @@ fn row_look(p: &Pal, r: &Row, phase: Phase, slow: bool, now: Instant) -> RowLook
     let pct = r.percent();
     let pct_text = pct.map_or_else(|| human_size(r.done), |f| format!("{:.0}%", f * 100.0));
     let stopped = |p: &Pal| RowLook {
-        glyph: "⏸",
+        glyph: Glyph::Pause,
         color: p.warn,
         text: pct.map_or("Stopped".into(), |f| format!("Stopped at {:.0}%", f * 100.0)),
         bar: pct.map(|f| (f, p.warn)),
         sized: true,
     };
+    let waiting = |p: &Pal, sized: bool| RowLook {
+        glyph: Glyph::Text("…"),
+        color: p.warn,
+        text: "Waiting".into(),
+        bar: None,
+        sized,
+    };
     match &r.state {
-        RowState::Queued => RowLook { glyph: "•", color: p.ink_dim, text: "Queued".into(), bar: None, sized: false },
-        RowState::Active if slow => {
-            RowLook { glyph: "…", color: p.warn, text: "Waiting".into(), bar: None, sized: true }
+        RowState::Queued => {
+            RowLook { glyph: Glyph::Text("•"), color: p.ink_dim, text: "Queued".into(), bar: None, sized: false }
         }
+        RowState::Active if slow => waiting(p, true),
         RowState::Active if phase == Phase::Paused => stopped(p),
-        RowState::Active => {
-            RowLook { glyph: "↓", color: p.accent, text: pct_text, bar: pct.map(|f| (f, p.accent)), sized: true }
-        }
+        RowState::Active => RowLook {
+            glyph: Glyph::Text("↓"),
+            color: p.accent,
+            text: pct_text,
+            bar: pct.map(|f| (f, p.accent)),
+            sized: true,
+        },
+        // During the site's cool-down nothing runs, whatever a row's own timer says; and a timer
+        // that has run out is "about to go", not "retry in 0 s".
+        RowState::Retrying { until, .. } if slow || *until <= now => waiting(p, false),
         RowState::Retrying { attempt, until } => {
             let secs = until.saturating_duration_since(now).as_secs_f64().ceil() as u64;
             RowLook {
-                glyph: "↻",
+                glyph: Glyph::Retry,
                 color: p.warn,
                 text: format!("Retry {attempt}/5 in {secs} s"),
                 bar: None,
                 sized: false,
             }
         }
-        RowState::Done => RowLook { glyph: "✓", color: p.ok, text: "Done".into(), bar: None, sized: false },
+        RowState::Done => {
+            RowLook { glyph: Glyph::Text("✓"), color: p.ok, text: "Done".into(), bar: None, sized: false }
+        }
         RowState::Skipped => {
-            RowLook { glyph: "✓", color: p.ink_dim, text: "Already saved".into(), bar: None, sized: false }
+            RowLook {
+                glyph: Glyph::Text("✓"), color: p.ink_dim, text: "Already saved".into(), bar: None, sized: false
+            }
         }
         RowState::Failed { .. } => {
-            RowLook { glyph: "×", color: p.bad, text: "Failed".into(), bar: None, sized: false }
+            RowLook { glyph: Glyph::Text("×"), color: p.bad, text: "Failed".into(), bar: None, sized: false }
         }
         RowState::Stopped => stopped(p),
     }
@@ -1076,7 +1198,7 @@ fn row_look(p: &Pal, r: &Row, phase: Phase, slow: bool, now: Instant) -> RowLook
 #[allow(clippy::too_many_arguments)]
 fn run_row(ui: &mut Ui, p: &Pal, cols: &Cols, r: &Row, phase: Phase, slow: bool, now: Instant, _zebra: bool) {
     let look = row_look(p, r, phase, slow, now);
-    glyph_cell(ui, cols, look.glyph, look.color);
+    glyph_cell(ui, cols, &look.glyph, look.color);
     cols.put(ui, 1, false, |ui| {
         let mut t = RichText::new(&r.name);
         if matches!(r.state, RowState::Queued) {
@@ -1087,11 +1209,19 @@ fn run_row(ui: &mut Ui, p: &Pal, cols: &Cols, r: &Row, phase: Phase, slow: bool,
     put_post(ui, p, cols, &r.post);
     cols.put(ui, 3, false, |ui| {
         if let Some((f, c)) = look.bar {
+            let text = num(look.text.clone()).color(if look.color == p.accent { p.ink } else { p.ink_dim });
+            // The bar gives way to the text, so the two can never reach into the Size column.
+            let text_w = ui
+                .painter()
+                .layout_no_wrap(look.text.clone(), egui::TextStyle::Monospace.resolve(ui.style()), c)
+                .size()
+                .x;
+            let bar_w = (ui.available_width() - text_w - ui.spacing().item_spacing.x - 2.0).clamp(20.0, 86.0);
             ui.scope(|ui| {
                 ui.spacing_mut().interact_size.y = 6.0;
-                ui.add(ProgressBar::new(f).desired_width(86.0).fill(c).corner_radius(CornerRadius::same(3)));
+                ui.add(ProgressBar::new(f).desired_width(bar_w).fill(c).corner_radius(CornerRadius::same(3)));
             });
-            ui.label(num(look.text.clone()).color(if look.color == p.accent { p.ink } else { p.ink_dim }));
+            ui.label(text);
         } else {
             let c = if matches!(look.color, c if c == p.ink_dim) { p.ink_dim } else { look.color };
             ui.label(RichText::new(look.text.clone()).color(c));
@@ -1107,4 +1237,37 @@ fn run_row(ui: &mut Ui, p: &Pal, cols: &Cols, r: &Row, phase: Phase, slow: bool,
         };
         ui.label(num(s).color(p.ink_dim));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn retrying(attempt: u32, until: Instant) -> Row {
+        Row { post: "p".into(), name: "f".into(), state: RowState::Retrying { attempt, until }, done: 0, total: None }
+    }
+
+    /// DAN-1543 D4: the card says "resuming in 49 s", so a row must not say "Retry 1/5 in 0 s".
+    #[test]
+    fn rows_say_waiting_during_the_cool_down_and_when_their_timer_ran_out() {
+        let p = Pal::new(crate::theme::Mode::Dark);
+        let now = Instant::now();
+        let cooling = row_look(&p, &retrying(1, now), Phase::Downloading, true, now);
+        assert_eq!(cooling.text, "Waiting");
+        let expired = row_look(&p, &retrying(1, now), Phase::Downloading, false, now + Duration::from_secs(1));
+        assert_eq!(expired.text, "Waiting");
+        let counting = row_look(&p, &retrying(2, now + Duration::from_secs(7)), Phase::Downloading, false, now);
+        assert_eq!(counting.text, "Retry 2/5 in 7 s");
+        assert!(matches!(counting.glyph, Glyph::Retry), "drawn, not a font glyph");
+    }
+
+    #[test]
+    fn stopped_rows_use_the_drawn_pause_icon() {
+        let p = Pal::new(crate::theme::Mode::Dark);
+        let r = Row { post: "p".into(), name: "f".into(), state: RowState::Stopped, done: 5, total: Some(10) };
+        let look = row_look(&p, &r, Phase::Paused, false, Instant::now());
+        assert_eq!(look.text, "Stopped at 50%");
+        assert!(matches!(look.glyph, Glyph::Pause));
+    }
 }

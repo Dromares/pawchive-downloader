@@ -97,6 +97,9 @@ pub struct FileEntry {
     /// Filled in by the size probe.
     pub size: Option<u64>,
     pub content_type: Option<String>,
+    /// The size probe got HTTP 404: Pawchive no longer holds the original. Permanent, so such a
+    /// file is never queued for download.
+    pub missing: bool,
 }
 
 impl FileEntry {
@@ -135,6 +138,7 @@ impl Post {
                 node: raw.node,
                 size: None,
                 content_type: None,
+                missing: false,
             });
         }
         out

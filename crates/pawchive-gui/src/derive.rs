@@ -37,20 +37,26 @@ pub struct Sel {
     pub files: usize,
     /// Sum of the sizes we know. Thumbnails are never counted.
     pub bytes: u64,
-    /// Some selected file has no size yet, so `bytes` is a lower bound (shown as `≥`).
+    /// Some selected file has no size yet and sizing is still running (or was skipped), so `bytes`
+    /// is a lower bound (shown as `≥`). Once sizing has finished the `≥` goes, even if a few
+    /// probes failed; `unsized_files` says how many.
     pub partial: bool,
+    /// Selected files whose size is not known.
+    pub unsized_files: usize,
     pub thumbnails: bool,
 }
 
-pub fn selection(summary: &FileSummary, checked: &HashSet<Category>, include_preview: bool) -> Sel {
+/// `lower_bound`: sizes may still arrive (sizing running) or were given up on (skipped).
+pub fn selection(summary: &FileSummary, checked: &HashSet<Category>, include_preview: bool, lower_bound: bool) -> Sel {
     let mut s = Sel::default();
     for cat in wanted(checked) {
         if let Some(stat) = summary.per_category.get(&cat) {
             s.files += stat.count;
             s.bytes += stat.bytes;
-            s.partial |= stat.unsized_files > 0;
+            s.unsized_files += stat.unsized_files;
         }
     }
+    s.partial = lower_bound && s.unsized_files > 0;
     if include_preview && summary.preview.count > 0 {
         s.files += summary.preview.count;
         s.thumbnails = true;
@@ -59,9 +65,12 @@ pub fn selection(summary: &FileSummary, checked: &HashSet<Category>, include_pre
 }
 
 /// Why Download is off while results are on screen (`None` = it can start).
-pub fn download_block(has_folder: bool, selected: usize) -> Option<&'static str> {
+/// `all_gone`: every full-size file the scan found answered 404 when sized.
+pub fn download_block(has_folder: bool, selected: usize, all_gone: bool) -> Option<&'static str> {
     if !has_folder {
         Some("Choose an output folder to enable Download.")
+    } else if selected == 0 && all_gone {
+        Some("Pawchive no longer has these files, so there is nothing to download.")
     } else if selected == 0 {
         Some("Tick at least one file type to enable Download.")
     } else {
@@ -116,25 +125,77 @@ mod tests {
 
     #[test]
     fn selection_counts_ticked_types_plus_custom_matches() {
-        let sel = selection(&summary(), &default_checked(), false);
+        let sel = selection(&summary(), &default_checked(), false, true);
         assert_eq!((sel.files, sel.bytes, sel.partial, sel.thumbnails), (58 + 28 + 4, 540, true, false));
-        let one = selection(&summary(), &[Category::Image].into_iter().collect(), false);
+        let one = selection(&summary(), &[Category::Image].into_iter().collect(), false, true);
         assert_eq!((one.files, one.bytes, one.partial), (62, 440, false), "custom matches are always selected");
     }
 
     #[test]
     fn thumbnails_add_files_but_never_bytes() {
-        let sel = selection(&summary(), &default_checked(), true);
+        let sel = selection(&summary(), &default_checked(), true, true);
         assert_eq!((sel.files, sel.bytes, sel.thumbnails), (58 + 28 + 4 + 4019, 540, true));
-        let none = selection(&FileSummary::default(), &default_checked(), true);
+        let none = selection(&FileSummary::default(), &default_checked(), true, true);
         assert_eq!((none.files, none.thumbnails), (0, false), "no preview files, nothing to tick");
     }
 
     #[test]
     fn download_block_reasons_are_the_spec_copy() {
-        assert_eq!(download_block(false, 5), Some("Choose an output folder to enable Download."));
-        assert_eq!(download_block(true, 0), Some("Tick at least one file type to enable Download."));
-        assert_eq!(download_block(true, 1), None);
+        assert_eq!(download_block(false, 5, false), Some("Choose an output folder to enable Download."));
+        assert_eq!(download_block(true, 0, false), Some("Tick at least one file type to enable Download."));
+        assert_eq!(download_block(true, 1, false), None);
+        assert!(download_block(true, 0, true).unwrap().starts_with("Pawchive no longer has"));
+    }
+
+    #[test]
+    fn the_lower_bound_marker_goes_when_sizing_ends_even_if_some_probes_failed() {
+        let checked = default_checked();
+        let mid = selection(&summary(), &checked, false, true);
+        assert!(mid.partial, "mid-probe: ≥");
+        let done = selection(&summary(), &checked, false, false);
+        assert!(!done.partial, "sizing finished: no ≥ although 3 probes failed");
+        assert_eq!(done.unsized_files, 3, "the failed probes are still counted, for an honest note");
+    }
+
+    /// DAN-1543 D1: every probe 404s (creator 1386751). Nothing is selectable, the count of files
+    /// Pawchive no longer has is reported, and Download says why it is off.
+    #[test]
+    fn files_that_404_when_sized_are_not_selected_and_are_counted() {
+        use crate::state::Level;
+        use pawchive_core::classify::CustomExts;
+        use pawchive_core::creator::CreatorRef;
+        use pawchive_core::model::{FileEntry, Service};
+        use pawchive_core::plan::summarize;
+        let now = Instant::now();
+        let mut m = Model::default();
+        let files: Vec<FileEntry> = (0..6)
+            .map(|i| FileEntry {
+                post_id: "1".into(),
+                post_title: "t".into(),
+                post_published: None,
+                name: format!("{i}.jpg"),
+                path: format!("/{i}.jpg"),
+                preview_only: false,
+                node: None,
+                size: None,
+                content_type: None,
+                missing: false,
+            })
+            .collect();
+        let creator = CreatorRef { service: Service::Fanbox, id: "1386751".into() };
+        m.apply(UiEvent::ScanFinished { creator, posts: 1, files }, now);
+        for index in 0..6 {
+            m.apply(UiEvent::FileMissing { index }, now);
+        }
+        m.apply(UiEvent::SizingFinished { skipped: false }, now);
+        assert_eq!(m.missing(), 6);
+        assert!(m.log.iter().any(|l| l.level == Level::Warn && l.text.starts_with("6 of 6 files are not on")));
+        let s = summarize(&m.files, &CustomExts::default());
+        assert_eq!(s.missing, 6);
+        assert!(s.per_category.is_empty(), "gone files are not in any type row");
+        let sel = selection(&s, &default_checked(), false, false);
+        assert_eq!((sel.files, sel.bytes, sel.partial), (0, 0, false));
+        assert!(download_block(true, sel.files, s.missing > 0).unwrap().contains("no longer has"));
     }
 
     #[test]

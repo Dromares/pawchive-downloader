@@ -41,12 +41,16 @@ pub struct FileSummary {
     pub per_category: BTreeMap<Category, Stat>,
     /// Preview-only files (thumbnail only), kept out of the category rows.
     pub preview: Stat,
+    /// Full-size files the server answered 404 for when sized: not offered, not counted above.
+    pub missing: usize,
 }
 
 pub fn summarize(files: &[FileEntry], custom: &CustomExts) -> FileSummary {
     let mut s = FileSummary::default();
     for f in files {
-        if f.preview_only {
+        if f.missing {
+            s.missing += 1;
+        } else if f.preview_only {
             s.preview.add(f);
         } else {
             s.per_category.entry(category_of(f, custom)).or_default().add(f);
@@ -85,6 +89,9 @@ pub fn plan_downloads(
             name = sanitize_component(&thumb_name(&name), MAX_COMPONENT_BYTES);
         }
         let name = alloc.allocate(&name);
+        if f.missing {
+            continue; // the server already said 404; a download could only fail
+        }
         let selected =
             if f.preview_only { sel.include_preview } else { sel.categories.contains(&category_of(f, custom)) };
         if !selected {

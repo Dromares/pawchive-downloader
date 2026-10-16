@@ -60,12 +60,32 @@ pub enum UiEvent {
     Log(String),
     ScanStarted(CreatorRef),
     ScanProgress(ScanProgress),
-    ScanFinished { creator: CreatorRef, posts: usize, files: Vec<FileEntry> },
+    ScanFinished {
+        creator: CreatorRef,
+        posts: usize,
+        files: Vec<FileEntry>,
+    },
     ScanFailed(String),
-    SizingProgress { done: usize, total: usize },
-    FileSized { index: usize, size: Option<u64>, content_type: Option<String> },
-    SizingFinished { skipped: bool },
-    DownloadStarted { jobs: Vec<JobInfo> },
+    SizingProgress {
+        done: usize,
+        total: usize,
+    },
+    FileSized {
+        index: usize,
+        size: Option<u64>,
+        content_type: Option<String>,
+    },
+    /// The size probe got HTTP 404: the server no longer has this file (index into the scan's
+    /// `files`). Such a file is excluded from downloads, like a 404 during a download.
+    FileMissing {
+        index: usize,
+    },
+    SizingFinished {
+        skipped: bool,
+    },
+    DownloadStarted {
+        jobs: Vec<JobInfo>,
+    },
     Download(engine::Event),
     DownloadFinished(engine::Summary),
 }
@@ -75,6 +95,7 @@ enum Msg {
     Cmd(Command),
     ScanDone(Result<crate::api::ScanResult, Error>),
     Sized { index: usize, size: Option<u64>, content_type: Option<String> },
+    Missing { index: usize },
     SizingDone { skipped: bool },
     Dl(engine::Event),
     DlDone(engine::Summary),
@@ -238,6 +259,12 @@ impl Session {
                 }
                 self.emit(UiEvent::FileSized { index, size, content_type });
             }
+            Msg::Missing { index } => {
+                if let Some(f) = self.files.get_mut(index) {
+                    f.missing = true;
+                }
+                self.emit(UiEvent::FileMissing { index });
+            }
             Msg::SizingDone { skipped } => {
                 self.sizing = None;
                 self.emit(UiEvent::SizingFinished { skipped });
@@ -373,6 +400,10 @@ impl Session {
                     Err(Error::Cancelled) => {
                         skipped = true;
                         break;
+                    }
+                    // Permanent: the original is gone (a download would 404 too).
+                    Err(Error::NotFound(_)) => {
+                        let _ = tx.send(Msg::Missing { index });
                     }
                     Err(e) => {
                         let _ = ev.send(UiEvent::Log(format!(
