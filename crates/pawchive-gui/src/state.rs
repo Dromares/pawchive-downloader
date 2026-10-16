@@ -321,8 +321,7 @@ impl Model {
     pub fn note_pause(&mut self) {
         if self.phase == Phase::Downloading {
             self.phase = Phase::Paused;
-            let partial = self.partial();
-            self.push_log(Level::Info, format!("Paused by you. {partial} partial files kept."));
+            self.push_log(Level::Info, pause_line(self.partial()));
         }
     }
 
@@ -581,6 +580,15 @@ impl Model {
     }
 }
 
+/// Log line for the moment the user pauses: `"Paused by you."`, `"... 1 partial file kept."`, `"... 3 partial files kept."`.
+fn pause_line(partial: usize) -> String {
+    match partial {
+        0 => "Paused by you.".into(),
+        1 => "Paused by you. 1 partial file kept.".into(),
+        n => format!("Paused by you. {n} partial files kept."),
+    }
+}
+
 /// Plain-language reason for a failed file (`ui-spec` section 8, Problems).
 pub fn explain_failure(error: &str) -> String {
     let tries =
@@ -729,13 +737,20 @@ mod tests {
     }
 
     #[test]
+    fn pause_line_pluralises_and_drops_the_zero_count() {
+        assert_eq!(pause_line(0), "Paused by you.");
+        assert_eq!(pause_line(1), "Paused by you. 1 partial file kept.");
+        assert_eq!(pause_line(2), "Paused by you. 2 partial files kept.");
+    }
+
+    #[test]
     fn pause_resume_and_cancel_drive_the_phase() {
         let (mut m, now) = started(3);
         m.apply(UiEvent::Download(Event::Started { id: 0 }), now);
         m.apply(UiEvent::Download(Event::Progress { id: 0, done: 40, total: Some(100) }), now);
         m.note_pause();
         assert_eq!(m.phase, Phase::Paused);
-        assert!(m.log.back().unwrap().text.contains("1 partial files kept"));
+        assert_eq!(m.log.back().unwrap().text, "Paused by you. 1 partial file kept.");
         let log_len = m.log.len();
         m.note_resume();
         assert_eq!(m.phase, Phase::Downloading);
