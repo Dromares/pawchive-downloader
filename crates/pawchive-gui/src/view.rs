@@ -67,7 +67,7 @@ impl App {
             ui.label(RichText::new("Pawchive Downloader").size(T_TITLE).strong());
             ui.label(dim(p, format!("v{}", pawchive_core::VERSION)));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(Button::new("⚙  Settings").min_size(vec2(0.0, 30.0))).on_hover_text("Ctrl+,").clicked() {
+                if ui.add(Button::new("Settings").min_size(vec2(0.0, 30.0))).on_hover_text("Ctrl+,").clicked() {
                     acts.push(Action::OpenSettings);
                 }
             });
@@ -169,6 +169,7 @@ impl App {
         let editable = phase == Phase::Ready;
         let w = ui.available_width();
         let widths = vec![128.0, (w - 128.0 - 52.0 - 88.0).max(40.0), 52.0, 88.0];
+        let probing = self.sizing_running();
         ui.spacing_mut().item_spacing.y = 0.0;
 
         let head = Cols::new(ui, 20.0, widths.clone());
@@ -198,7 +199,7 @@ impl App {
                 let t = if live { "…".into() } else { comma(stat.count) };
                 ui.label(num(t).color(if has || live { p.ink } else { p.ink_dim }));
             });
-            c.put(ui, 3, true, |ui| size_cell(ui, p, live, has, stat.bytes, stat.unsized_files > 0));
+            c.put(ui, 3, true, |ui| size_cell(ui, p, live, has, stat.bytes, stat.unsized_files > 0, probing));
             if changed {
                 if on {
                     self.checked.insert(cat);
@@ -844,14 +845,19 @@ impl App {
 
 // ---- free drawing helpers ---------------------------------------------------------------------
 
-fn size_cell(ui: &mut Ui, p: &Pal, live: bool, has: bool, bytes: u64, partial: bool) {
+fn size_cell(ui: &mut Ui, p: &Pal, live: bool, has: bool, bytes: u64, partial: bool, probing: bool) {
     if live {
         ui.label(num("…").color(p.ink_dim));
     } else if !has {
         ui.label(num("—").color(p.ink_dim));
     } else if partial {
-        // Some sizes are unknown: a lower bound in the dim colour, or "…" while nothing is known yet.
-        let t = if bytes == 0 { "…".to_string() } else { size_label(bytes, true) };
+        // Some sizes are unknown: a lower bound in the dim colour; nothing known yet reads "…"
+        // while probing and "—" once probing has ended.
+        let t = match (bytes, probing) {
+            (0, true) => "…".to_string(),
+            (0, false) => "—".to_string(),
+            _ => size_label(bytes, true),
+        };
         ui.label(num(t).color(p.ink_dim));
     } else {
         ui.label(num(human_size(bytes)));

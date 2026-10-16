@@ -25,6 +25,10 @@ a contact string appended to the user agent (`pawchive-downloader/<version> (<co
 optional Netscape `cookies.txt`. The cookie file is read into memory only; its contents are never
 logged, shown or saved, and only its path is remembered.
 
+Keyboard: Enter scans, Ctrl+L focuses the link, Ctrl+O browses, Ctrl+P pauses/resumes, Ctrl+Enter presses
+the bottom bar's main button, Ctrl+, opens settings, Ctrl+Q quits (it asks first while a download runs).
+The layout follows the UI spec on DAN-1542.
+
 ## Politeness
 
 The site's bot page asks for at most 1 request per second, at most 5 active downloads and an

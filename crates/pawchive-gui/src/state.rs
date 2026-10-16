@@ -572,7 +572,11 @@ pub fn explain_failure(error: &str) -> String {
 
 /// Second line of the scan-error card: the cause, then what was found before it stopped.
 pub fn explain_scan_error(message: &str, posts: usize) -> String {
-    let found = format!("{} posts were found before it stopped.", crate::format::comma(posts));
+    let found = match posts {
+        0 => "No posts were found before it stopped.".to_string(),
+        1 => "1 post was found before it stopped.".to_string(),
+        n => format!("{} posts were found before it stopped.", crate::format::comma(n)),
+    };
     let cause = if let Some(code) = message
         .strip_prefix("server answered HTTP ")
         .and_then(|r| r.split(' ').next())
