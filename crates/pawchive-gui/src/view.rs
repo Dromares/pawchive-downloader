@@ -571,9 +571,10 @@ impl App {
                     card_head(ui, p, Lead::Glyph("⚠", p.warn), &title, Some(counter));
                     bar(ui, saved as f32 / total.max(1) as f32, p.warn);
                     ui.label(format!(
-                        "{saved} files saved ({}) in {}. {failed} failed.",
+                        "{saved} files saved ({}) in {}. {failed} failed.{}",
                         human_size(m.bytes_saved()),
-                        clock(m.elapsed(now))
+                        clock(m.elapsed(now)),
+                        derive::missing_sentence(m.missing())
                     ));
                     ui.label(dim(p, "See the Problems tab. Retry failed tries the ones that can still work."));
                 });
@@ -651,7 +652,7 @@ impl App {
                     })
                     .strong(),
                 );
-                ui.label(dim(p, format!("· {retryable} can be retried")));
+                ui.label(dim(p, format!("· {retryable} can be retried{}", derive::missing_header_part(gone.len()))));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let b = Button::new(format!("Retry failed ({retryable})")).min_size(vec2(0.0, 30.0));
                     if ui.add_enabled(retryable > 0 && can_retry, b).clicked() {

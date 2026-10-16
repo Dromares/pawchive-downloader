@@ -137,6 +137,25 @@ pub fn problems(n: usize) -> String {
     }
 }
 
+/// Last sentence of the finished-with-failures card when files were 404 at sizing:
+/// `" 1 isn't on Pawchive."` / `" 2 aren't on Pawchive."`, or empty when none. Leading space included.
+pub fn missing_sentence(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => " 1 isn't on Pawchive.".into(),
+        n => format!(" {n} aren't on Pawchive."),
+    }
+}
+
+/// Tail of the Problems header: `" · 1 not on Pawchive"`, or empty when none.
+pub fn missing_header_part(n: usize) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        format!(" · {n} not on Pawchive")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +344,14 @@ mod tests {
     fn problems_pluralises() {
         assert_eq!(problems(1), "1 problem");
         assert_eq!(problems(3), "3 problems");
+    }
+
+    #[test]
+    fn missing_copy_is_empty_without_missing_files() {
+        assert_eq!(missing_sentence(0), "");
+        assert_eq!(missing_sentence(1), " 1 isn't on Pawchive.");
+        assert_eq!(missing_sentence(3), " 3 aren't on Pawchive.");
+        assert_eq!(missing_header_part(0), "");
+        assert_eq!(missing_header_part(2), " · 2 not on Pawchive");
     }
 }
