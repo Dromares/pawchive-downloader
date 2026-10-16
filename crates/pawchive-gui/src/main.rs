@@ -19,6 +19,10 @@ use pawchive_core::api::Hosts;
 use pawchive_core::session::{self, Tuning};
 use pawchive_core::settings::Settings;
 
+/// Wayland `app_id` / X11 `WM_CLASS`. It matches the binary name, the installed icon name and the
+/// `.desktop` file (`StartupWMClass`), which is what lets a compositor find the icon and group windows.
+const APP_ID: &str = "pawchive-downloader";
+
 fn main() -> eframe::Result {
     let settings = Settings::load();
     let mut hosts = Hosts::default();
@@ -28,6 +32,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Pawchive Downloader")
+            .with_app_id(APP_ID)
             .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
