@@ -47,6 +47,9 @@ First release: a desktop app for downloading a creator's files from [Pawchive](h
 - **The window has no icon of its own yet.** The menu and dock icon comes from the desktop entry, which
   an unintegrated AppImage does not install; until it is integrated (for example with AppImageLauncher)
   the window shows your desktop's default icon.
+- **Japanese and other CJK text needs a Noto CJK font installed on the system** (`fonts-noto-cjk` on
+  Debian/Ubuntu); no font is bundled. Without one, post titles and file names, and the check mark in
+  "Scan complete", show as empty boxes.
 - **The AppImage is unsigned** and does not update itself.
 - Only Patreon and Fanbox profile links are recognised.
 - No licence has been chosen yet.
