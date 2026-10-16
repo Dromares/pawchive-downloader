@@ -22,12 +22,12 @@ product-name = "Pawchive Downloader"
 identifier = "pw.pawchive.downloader"
 description = "Download a creator's files from Pawchive, with pause and resume."
 homepage = "https://github.com/Dromares/pawchive-downloader"
-category = "Network"
 formats = ["appimage"]
 icons = ["assets/pawchive-downloader-*.png"]
 binaries = [{ path = "pawchive-downloader", main = true }]
 
 [package.metadata.packager.deb]
 # cargo-packager builds the AppImage from the same data tree as a .deb, so this template drives the
-# AppImage's .desktop file too. It exists to add GenericName, Keywords and StartupWMClass.
+# AppImage's .desktop file too. It exists to set Categories (cargo-packager has no Network;FileTransfer
+# category), GenericName, Keywords and StartupWMClass.
 desktop-template = "assets/pawchive-downloader.desktop"
