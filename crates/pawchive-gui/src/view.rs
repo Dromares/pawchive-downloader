@@ -21,6 +21,7 @@ use crate::theme::*;
 use crate::widgets::{bar, card, dim, heading, indeterminate, num, primary, readout, secondary, Cols};
 
 const PRIMARY_W: f32 = 164.0;
+const BROWSE_W: f32 = 92.0;
 const SLOWDOWN_SECS: f32 = 60.0;
 
 pub fn url_id() -> egui::Id {
@@ -80,16 +81,25 @@ impl App {
 
     pub(crate) fn left(&mut self, ui: &mut Ui, p: &Pal, acts: &mut Vec<Action>) {
         // Step 3 is pinned to the bottom so Browse… is always reachable and the steps never scroll off.
-        egui::Panel::bottom("save_to")
+        // The panel must be laid out first to claim its space, but egui's Tab order is widget creation
+        // order, so it only reserves a slot for Browse…; the button itself is created after step 2
+        // (UI-SPEC §7: … Extensions → Browse… → tabs).
+        let browse_slot = egui::Panel::bottom("save_to")
             .show_separator_line(false)
             .frame(Frame::new().inner_margin(Margin { left: 0, right: 0, top: 8, bottom: 14 }))
-            .show(ui, |ui| self.save_to(ui, p, acts));
+            .show(ui, |ui| self.save_to(ui, p))
+            .inner;
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = S2;
             self.step_profile(ui, p, acts);
             ui.add_space(S3);
             self.step_types(ui, p, acts);
         });
+        let can = !self.model.phase.busy() && !self.picker_busy;
+        let browse = Button::new("Browse…").min_size(vec2(BROWSE_W, 32.0));
+        if ui.put(browse_slot, |ui: &mut Ui| ui.add_enabled(can, browse)).on_hover_text("Ctrl+O").clicked() {
+            acts.push(Action::Browse);
+        }
     }
 
     fn step_profile(&mut self, ui: &mut Ui, p: &Pal, acts: &mut Vec<Action>) {
@@ -275,24 +285,21 @@ impl App {
         }
     }
 
-    fn save_to(&mut self, ui: &mut Ui, p: &Pal, acts: &mut Vec<Action>) {
+    /// Draws step 3 and returns the rect left open for the Browse… button (see `left`).
+    fn save_to(&mut self, ui: &mut Ui, p: &Pal) -> egui::Rect {
         ui.spacing_mut().item_spacing.y = S2;
         ui.separator();
         heading(ui, p, "3", "Save to");
-        ui.horizontal(|ui| {
+        let slot = ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = S2;
-            let w = ui.available_width() - 92.0 - S2;
+            let w = ui.available_width() - BROWSE_W - S2;
             if self.has_folder() {
                 let path = self.output.trim().to_string();
                 readout(ui, p, w, RichText::new(path.clone()).monospace(), Some(&path));
             } else {
                 readout(ui, p, w, dim(p, "No folder chosen"), None);
             }
-            let can = !self.model.phase.busy() && !self.picker_busy;
-            if ui.add_enabled(can, Button::new("Browse…").min_size(vec2(92.0, 32.0))).on_hover_text("Ctrl+O").clicked()
-            {
-                acts.push(Action::Browse);
-            }
+            ui.allocate_exact_size(vec2(BROWSE_W, 32.0), egui::Sense::hover()).0
         });
         let line = match (&self.model.creator, self.has_folder()) {
             (Some(c), true) => format!(
@@ -303,6 +310,7 @@ impl App {
             _ => "Each profile gets its own subfolder.".to_string(),
         };
         ui.add(egui::Label::new(dim(p, line)).truncate());
+        slot.inner
     }
 
     // =========================================================================================
