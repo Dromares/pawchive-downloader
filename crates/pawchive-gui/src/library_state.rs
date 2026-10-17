@@ -116,6 +116,23 @@ pub fn summary_clauses(new_posts: usize, updated: usize, new_files: usize, gone:
     parts.join(", ")
 }
 
+/// Line 1 of the card after an update that found nothing. With every file downloaded it is the spec's
+/// `0 new files. {n} files are already downloaded.`; when files are still waiting (a partly downloaded
+/// profile) that wording would contradict the bottom bar's `Download new only (n)`, so the card says
+/// nothing *in this update* was new and names the files that are still waiting (DAN-1676).
+pub fn zero_update_files_line(downloaded: usize, pending: usize) -> String {
+    let are = |n: usize| if n == 1 { "1 file is".to_string() } else { format!("{} files are", comma(n)) };
+    if pending == 0 {
+        return format!("0 new files. {} already downloaded.", are(downloaded));
+    }
+    let mut line = format!("No new files in this update. {} not downloaded yet", plural(pending, "file", "files"));
+    if downloaded > 0 {
+        line.push_str(&format!(", {} already downloaded", comma(downloaded)));
+    }
+    line.push('.');
+    line
+}
+
 /// The card headline after an update: the summary, with `Up to date — ` in front when nothing changed.
 pub fn update_headline(s: &UpdateSummary) -> String {
     let line = summary_clauses(s.new_posts, s.updated_posts, s.new_files, s.gone_posts);
@@ -256,6 +273,18 @@ mod tests {
         assert_eq!(short_time(t, |_| -5 * 3600), "2025-12-31 18:30");
         assert_eq!(short_time(0, |_| 0), "1970-01-01 00:00");
         assert_eq!(short_time(951_782_400, |_| 0), "2000-02-29 00:00", "leap day");
+    }
+
+    #[test]
+    fn the_zero_update_line_never_contradicts_files_still_waiting() {
+        assert_eq!(zero_update_files_line(2, 0), "0 new files. 2 files are already downloaded.");
+        assert_eq!(zero_update_files_line(1, 0), "0 new files. 1 file is already downloaded.");
+        assert_eq!(
+            zero_update_files_line(10, 253),
+            "No new files in this update. 253 files not downloaded yet, 10 already downloaded."
+        );
+        assert_eq!(zero_update_files_line(0, 1), "No new files in this update. 1 file not downloaded yet.");
+        assert_eq!(zero_update_files_line(0, 1_204), "No new files in this update. 1,204 files not downloaded yet.");
     }
 
     #[test]

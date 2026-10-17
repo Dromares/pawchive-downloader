@@ -1566,6 +1566,22 @@ mod tests {
         assert!(seen.iter().any(|l| l == "Update"));
     }
 
+    /// DAN-1676: with no measured size among the files to fetch the bar read `≥ 0 B`, while the card
+    /// beside it (and every other place) said `size not measured`.
+    #[test]
+    fn the_new_only_bar_says_size_not_measured_instead_of_zero_bytes() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = saved_app(&ctx, Loaded::Opened);
+        let mut unsized_files = profile_loaded(Loaded::Opened, 1);
+        unsized_files.files.iter_mut().for_each(|f| f.size = None);
+        app.model.apply(Ev::ProfileLoaded(Box::new(unsized_files)), Instant::now());
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "2 new files · size not measured"), "{seen:?}");
+        assert!(has(&seen, "2 new files selected · size not measured"), "{seen:?}");
+        assert!(!has(&seen, "≥ 0 B"), "{seen:?}");
+    }
+
     #[test]
     fn the_bottom_bar_offers_new_only_once_there_is_history() {
         let ctx = egui::Context::default();
@@ -1660,7 +1676,14 @@ mod tests {
         app.model.apply(Ev::ProfileLoaded(Box::new(profile_loaded(report(zero, true), 1))), now);
         let seen = labels(&ctx, &mut app);
         assert!(seen.iter().any(|l| l == "Up to date — 0 new posts, 0 updated"), "{seen:?}");
-        assert!(has(&seen, "0 new files. 2 files are already downloaded."), "{seen:?}");
+        // Two files are still waiting (the fixture), so "0 new files" would contradict the bottom bar's
+        // "Download new only (2)" (DAN-1676).
+        assert!(
+            has(&seen, "No new files in this update. 2 files not downloaded yet, 2 already downloaded."),
+            "{seen:?}"
+        );
+        assert!(!has(&seen, "0 new files."), "{seen:?}");
+        assert!(seen.iter().any(|l| l == "Download new only (2)"), "{seen:?}");
         assert!(
             has(&seen, "Pawchive reports no changes since 2026-10-17 13:02. Full rescan checks every post anyway."),
             "{seen:?}"
@@ -1668,6 +1691,13 @@ mod tests {
         app.model.apply(Ev::ProfileLoaded(Box::new(profile_loaded(report(zero, false), 1))), now);
         let seen = labels(&ctx, &mut app);
         assert!(has(&seen, "All 1,427 posts were read and none changed."), "{seen:?}");
+        // Everything downloaded: the spec's wording stands.
+        let mut done = profile_loaded(report(zero, true), 1);
+        done.marks.iter_mut().for_each(|m| m.pending = false);
+        app.model.apply(Ev::ProfileLoaded(Box::new(done)), now);
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "0 new files. 2 files are already downloaded."), "{seen:?}");
+        assert!(seen.iter().any(|l| l == "Download new only (0)"), "{seen:?}");
     }
 
     #[test]

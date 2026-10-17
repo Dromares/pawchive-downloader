@@ -637,14 +637,7 @@ impl App {
                 let head = ls::update_headline(&r.summary);
                 let line1 = if zero && saved.has_history() {
                     let downloaded = saved.marks.iter().filter(|m| m.downloaded).count();
-                    format!(
-                        "0 new files. {} already downloaded.",
-                        if downloaded == 1 {
-                            "1 file is".to_string()
-                        } else {
-                            format!("{} files are", comma(downloaded))
-                        }
-                    )
+                    ls::zero_update_files_line(downloaded, self.new_only().files)
                 } else {
                     self.selection_line(Some(r.summary.new_files))
                 };

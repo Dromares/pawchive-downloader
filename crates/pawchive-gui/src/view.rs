@@ -1007,7 +1007,7 @@ impl App {
                         (None, n) => RichText::new(format!(
                             "{} · {}",
                             if n == 1 { "1 new file".to_string() } else { format!("{} new files", comma(n)) },
-                            size_label(new_only.bytes, new_only.partial)
+                            self.size_text(new_only.bytes, new_only.unsized_files, new_only.partial)
                         ))
                         .monospace(),
                     },
