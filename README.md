@@ -28,13 +28,27 @@ A Rust-only desktop app for downloading a creator's files from [Pawchive](https:
    and the contact string are sent to pawchive.pw only.
 5. Pause, resume or cancel at any time; interrupted files keep a `.part` file and resume with a
    `Range` request. Failed files are listed with **Retry failed**.
+6. **Saved profiles.** The first scan of a creator saves it (post list, files, links and what you
+   downloaded) in `$XDG_DATA_HOME/pawchive-downloader/library.sqlite3` (default
+   `~/.local/share/pawchive-downloader/`). On the next launch the saved profiles are listed in the middle of
+   the window: **Open** shows the saved copy without any request. **Update** (the button reads Update
+   whenever the link is a saved profile; Ctrl+U) asks the profile one question first and reads the post list
+   only if something changed; **Full rescan** reads every post regardless. An update that is stopped or
+   fails changes nothing. The **Posts** tab labels what the last update that found a change found: **New**,
+   **Updated**, and **Gone from site** for as long as Pawchive no longer lists a post (its files stay in
+   your folder). **Download new only** fetches only files not downloaded before, even if you moved or
+   deleted older ones; **Download all** fetches every selected file that is not in the folder. Neither
+   ever replaces a file: a replaced file is saved beside the old one as `name (2)`. **Remove** forgets a
+   saved profile (its post list and download history) and never touches a downloaded file. Pawchive's own
+   list can skip a live post, so a post missing from the list is asked for on its own before it is marked
+   gone. A post link is never saved.
 
 Settings: concurrent downloads (1-5, default 2), minimum delay between requests (never below 1 s),
 a contact string appended to the user agent (`pawchive-downloader/<version> (<contact>)`), and an
 optional Netscape `cookies.txt`. The cookie file is read into memory only; its contents are never
 logged, shown or saved, and only its path is remembered.
 
-Keyboard: Enter scans, Ctrl+L focuses the link, Ctrl+O browses, Ctrl+P pauses/resumes, Ctrl+Enter presses
+Keyboard: Enter scans (or updates), Ctrl+U updates, Ctrl+L focuses the link, Ctrl+O browses, Ctrl+P pauses/resumes, Ctrl+Enter presses
 the bottom bar's main button, Ctrl+, opens settings, Ctrl+Q quits (it asks first while a download runs).
 The layout follows the UI spec on DAN-1542.
 
@@ -103,8 +117,8 @@ is any empty directory with about 6 GB free.
    ```
    $IN cargo build --release
    $IN cargo packager --release --formats appimage
-   cp $REPO/target/release/pawchive-downloader_0.2.0_x86_64.AppImage $WORK/pawchive-downloader-0.2.0-x86_64.AppImage
-   cd $WORK && sha256sum pawchive-downloader-0.2.0-x86_64.AppImage > pawchive-downloader-0.2.0-x86_64.AppImage.sha256
+   cp $REPO/target/release/pawchive-downloader_0.3.0_x86_64.AppImage $WORK/pawchive-downloader-0.3.0-x86_64.AppImage
+   cd $WORK && sha256sum pawchive-downloader-0.3.0-x86_64.AppImage > pawchive-downloader-0.3.0-x86_64.AppImage.sha256
    ```
 
    The packager settings are in `crates/pawchive-gui/Cargo.toml` (`[package.metadata.packager]`); the icons
@@ -114,7 +128,7 @@ is any empty directory with about 6 GB free.
 
    ```
    objdump -T $REPO/target/release/pawchive-downloader | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1   # GLIBC_2.35
-   $WORK/pawchive-downloader-0.2.0-x86_64.AppImage --appimage-extract     # unpacks to ./squashfs-root
+   $WORK/pawchive-downloader-0.3.0-x86_64.AppImage --appimage-extract     # unpacks to ./squashfs-root
    find squashfs-root -name '*.so*'                                         # nothing is bundled
    ```
 
@@ -163,7 +177,11 @@ Debug builds also read `PAWCHIVE_DEV_BASE_URL` (send every request to a local te
 pawchive.pw), `PAWCHIVE_DEV_AUTOSCAN=<url>`, `PAWCHIVE_DEV_AUTODOWNLOAD=<dir>`,
 `PAWCHIVE_DEV_OPEN_SETTINGS=1` and `PAWCHIVE_DEV_SHOT_AFTER_SECS=<n>`, plus, for the external-links work,
 `PAWCHIVE_DEV_LINKS_TAB=1`, `PAWCHIVE_DEV_CHECK_LINKS=1`, `PAWCHIVE_DEV_TICK_LINKS=1|<host>` and
-`PAWCHIVE_DEV_EXPORT_DIR=<dir>` (write the export files without a save dialog). `PAWCHIVE_DEV_BASE_URL` also
+`PAWCHIVE_DEV_EXPORT_DIR=<dir>` (write the export files without a save dialog); for the saved library,
+`PAWCHIVE_DEV_AUTOOPEN=<url>`, `PAWCHIVE_DEV_FULL=1` (the autoscan is a full rescan),
+`PAWCHIVE_DEV_NEW_ONLY=1` (the autodownload is Download new only), `PAWCHIVE_DEV_TAB=posts|links|…`,
+`PAWCHIVE_DEV_CONFIRM_REMOVE=1` and `PAWCHIVE_DEV_CANCEL_AFTER_SECS=<n>`. `XDG_DATA_HOME` moves the library,
+so a test run never needs to touch the real one. `PAWCHIVE_DEV_BASE_URL` also
 re-bases the requests to Google Drive and Mediafire onto the test server.
 
 No licence has been chosen yet.

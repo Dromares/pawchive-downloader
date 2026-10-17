@@ -9,7 +9,9 @@ publish.workspace = true
 # in-process clipboard, so Ctrl+V and the middle-click paste read nothing from the system (DAN-1600).
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wayland", "x11"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-pawchive-core = { version = "0.2.0", path = "../pawchive-core" }
+# Only for `localtime_r`, to show "Last scanned" in the user's own time zone (already in the tree via eframe).
+libc = "0.2"
+pawchive-core = { version = "0.3.0", path = "../pawchive-core" }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 
 # The binary is named after the app id (see `APP_ID` in `src/main.rs`) so that the desktop entry,

@@ -8,12 +8,14 @@ use pawchive_core::api::ScanProgress;
 use pawchive_core::creator::{CreatorRef, ScanTarget};
 use pawchive_core::engine::{Event, Summary};
 use pawchive_core::external::ExtHost;
+use pawchive_core::library::{PostRow, ProfileRecord};
 use pawchive_core::links::{self, PostRef};
 use pawchive_core::model::FileEntry;
 use pawchive_core::plan::JobOrigin;
-use pawchive_core::session::UiEvent;
+use pawchive_core::session::{FileMark, Loaded, ProfileLoaded, UiEvent, UpdateKind, UpdateStep};
 
-use crate::format::human_size;
+use crate::format::{comma, human_size};
+use crate::library_state::{self, PostFilter};
 use crate::links_state::{Check, LinkFilter, LinkRow};
 
 const LOG_CAP: usize = 1000;
@@ -136,8 +138,66 @@ pub struct ScanFailure {
     pub progress: ScanProgress,
 }
 
+/// What the model knows about the library.
+#[derive(Clone, Debug, Default)]
+pub enum Lib {
+    /// No library at all (the plain scan of v0.2.0).
+    #[default]
+    Off,
+    /// It could not be opened; the app works without it.
+    Unavailable(String),
+    /// The saved profiles, most recently scanned first.
+    On(Vec<ProfileRecord>),
+}
+
+/// An update that is running: the previous data stays on screen.
+#[derive(Clone, Copy, Debug)]
+pub struct UpdateRun {
+    pub kind: UpdateKind,
+    pub step: UpdateStep,
+    /// Posts the saved copy has: `est_pages` comes from it.
+    pub saved_posts: usize,
+    pub last_scanned: Option<i64>,
+    /// When the write began; the card says "Saving…" only if it takes longer than 400 ms.
+    pub saving_since: Option<Instant>,
+}
+
+/// Why the last update left the saved copy as it was. Cleared by the next scan, open or download.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Notice {
+    Failed { page: usize, cause: String, saving: bool },
+    Cancelled,
+}
+
+/// The saved profile on screen, as the library gave it.
+#[derive(Clone, Debug)]
+pub struct SavedView {
+    pub record: ProfileRecord,
+    pub posts: Vec<PostRow>,
+    /// One per entry of `Model::files`.
+    pub marks: Vec<FileMark>,
+    pub how: Loaded,
+}
+
+impl SavedView {
+    pub fn has_history(&self) -> bool {
+        self.marks.iter().any(|m| m.downloaded)
+    }
+
+    pub fn count(&self, filter: PostFilter) -> usize {
+        self.posts.iter().filter(|p| filter.matches(p.label)).count()
+    }
+}
+
 pub struct Model {
     pub phase: Phase,
+    pub lib: Lib,
+    pub saved: Option<SavedView>,
+    pub update: Option<UpdateRun>,
+    pub notice: Option<Notice>,
+    pub post_filter: PostFilter,
+    /// `Removed “Name”. Downloaded files were kept.` until the next action.
+    pub removed_note: Option<String>,
     pub creator: Option<CreatorRef>,
     /// What the pasted link asked for: a whole creator, or one post (`post_id`).
     pub scan_target: Option<ScanTarget>,
@@ -180,6 +240,12 @@ impl Default for Model {
     fn default() -> Self {
         Model {
             phase: Phase::Empty,
+            lib: Lib::Off,
+            saved: None,
+            update: None,
+            notice: None,
+            post_filter: PostFilter::All,
+            removed_note: None,
             creator: None,
             scan_target: None,
             scan_post: None,
@@ -221,6 +287,129 @@ impl Model {
             self.log.pop_front();
         }
         self.log.push_back(LogLine { unix: unix_now(), level, text: text.into() });
+    }
+
+    // ---- the library ------------------------------------------------------------------------
+
+    /// The saved profiles, if the library is open.
+    pub fn profiles(&self) -> &[ProfileRecord] {
+        match &self.lib {
+            Lib::On(p) => p,
+            _ => &[],
+        }
+    }
+
+    pub fn library_on(&self) -> bool {
+        matches!(self.lib, Lib::On(_))
+    }
+
+    /// The creator is in the library (a saved profile, open or not).
+    pub fn is_saved(&self, c: &CreatorRef) -> bool {
+        self.profiles().iter().any(|p| &p.creator == c)
+    }
+
+    pub fn record_of(&self, c: &CreatorRef) -> Option<&ProfileRecord> {
+        self.profiles().iter().find(|p| &p.creator == c)
+    }
+
+    /// Back to the saved-profiles list: nothing is open, nothing is lost (it is in the library).
+    pub fn close_profile(&mut self) {
+        self.phase = Phase::Empty;
+        self.creator = None;
+        self.saved = None;
+        self.files.clear();
+        self.files_version += 1;
+        self.rows.clear();
+        self.summary = None;
+        self.links.clear();
+        self.links_posts = 0;
+        self.notice = None;
+        self.update = None;
+        self.scan_target = None;
+        self.posts = 0;
+    }
+
+    fn drop_data(&mut self) {
+        self.links.clear();
+        self.links_posts = 0;
+        self.link_filter = LinkFilter::All;
+        self.checking = None;
+        self.awaiting_checks = false;
+        self.cooldowns.clear();
+        self.link_jobs.clear();
+        self.rows.clear();
+        self.summary = None;
+        self.slow_until = None;
+        self.cancel_requested = false;
+        self.scan_failure = None;
+    }
+
+    fn apply_loaded(&mut self, p: ProfileLoaded, now: Instant) {
+        let ProfileLoaded { how, record, posts, files, marks, links, probing } = p;
+        let creator = record.creator.clone();
+        let name = record.name.clone().unwrap_or_else(|| format!("{}/{}", creator.service.as_str(), creator.id));
+        self.drop_data();
+        self.notice = None;
+        self.removed_note = None;
+        self.update = None;
+        self.post_filter = PostFilter::All;
+        self.links_posts = links::posts_with_links(&links);
+        self.links = links.into_iter().map(LinkRow::new).collect();
+        match &how {
+            Loaded::First => self.push_log(
+                Level::Info,
+                format!(
+                    "Saved profile “{name}” ({}/{}): {} posts",
+                    creator.service.as_str(),
+                    creator.id,
+                    comma(record.posts)
+                ),
+            ),
+            Loaded::Opened => {}
+            Loaded::Updated(r) => {
+                if r.unchanged {
+                    let when = record
+                        .site_updated
+                        .as_deref()
+                        .map_or_else(|| "the last scan".to_string(), crate::library_view::site_time);
+                    self.push_log(Level::Info, format!("Profile unchanged since {when} (1 request)"));
+                } else {
+                    let pages = self.scan_progress.pages;
+                    self.push_log(
+                        Level::Info,
+                        format!(
+                            "Read {} {}, {} posts",
+                            pages,
+                            if pages == 1 { "page" } else { "pages" },
+                            comma(r.posts_seen)
+                        ),
+                    );
+                }
+                self.push_log(
+                    Level::Info,
+                    format!(
+                        "Update finished: {} ({}/{})",
+                        library_state::update_headline(&r.summary).trim_start_matches("Up to date — "),
+                        creator.service.as_str(),
+                        creator.id
+                    ),
+                );
+            }
+        }
+        self.sizing = match (&how, probing) {
+            (Loaded::Opened, _) => Sizing::Finished { skipped: true },
+            (_, 0) => Sizing::Finished { skipped: false },
+            (_, n) => Sizing::Running { done: 0, total: n },
+        };
+        self.posts = record.posts;
+        self.scan_target = Some(ScanTarget { creator: creator.clone(), post_id: None });
+        self.scan_post = None;
+        self.creator = Some(creator);
+        self.files = files;
+        self.files_version += 1;
+        self.saved = Some(SavedView { record, posts, marks, how });
+        self.phase = Phase::Ready;
+        let _ = now;
     }
 
     // ---- derived numbers ------------------------------------------------------------------
@@ -484,6 +673,10 @@ impl Model {
             }
             UiEvent::ScanStarted(target) => {
                 let c = target.creator.clone();
+                self.saved = None;
+                self.update = None;
+                self.notice = None;
+                self.removed_note = None;
                 self.scan_target = Some(target);
                 self.scan_post = None;
                 self.links.clear();
@@ -514,6 +707,7 @@ impl Model {
                 self.scan_last_progress = Some(now);
             }
             UiEvent::ScanFinished { creator, posts, files, links: found, post } => {
+                self.saved = None;
                 let n_links = match found.len() {
                     0 => String::new(),
                     1 => ", 1 external link".to_string(),
@@ -644,6 +838,8 @@ impl Model {
                 self.push_log(Level::Info, "Checking the picked links before the download starts");
             }
             UiEvent::DownloadStarted { jobs } => {
+                self.notice = None;
+                self.removed_note = None;
                 self.awaiting_checks = false;
                 self.phase = Phase::Downloading;
                 self.summary = None;
@@ -672,6 +868,103 @@ impl Model {
                 self.push_log(Level::Info, format!("Download started: {} files", self.rows.len()));
             }
             UiEvent::Download(e) => self.apply_download(e, now),
+            UiEvent::Profiles(Ok(list)) => self.lib = Lib::On(list),
+            UiEvent::Profiles(Err(why)) => self.lib = Lib::Unavailable(why),
+            UiEvent::UpdateStarted { kind, creator } => {
+                let saved = self.record_of(&creator).cloned().or_else(|| self.saved.as_ref().map(|s| s.record.clone()));
+                let (saved_posts, last_scanned) = saved.as_ref().map_or((0, None), |r| (r.posts, r.last_scanned_at));
+                self.update = Some(UpdateRun {
+                    kind,
+                    // A full rescan skips the check and starts at the reading state.
+                    step: if kind == UpdateKind::Full { UpdateStep::Reading } else { UpdateStep::Checking },
+                    saved_posts,
+                    last_scanned,
+                    saving_since: None,
+                });
+                self.notice = None;
+                self.removed_note = None;
+                self.rows.clear();
+                self.summary = None;
+                self.slow_until = None;
+                self.cancel_requested = false;
+                self.scan_failure = None;
+                self.scan_target = Some(ScanTarget { creator: creator.clone(), post_id: None });
+                self.phase = Phase::Scanning;
+                self.scan_progress = ScanProgress::default();
+                self.scan_started = Some(now);
+                self.scan_last_progress = Some(now);
+                let when = last_scanned.map_or(String::new(), |t| {
+                    format!(" (last scanned {})", library_state::short_time(t, library_state::utc_offset))
+                });
+                self.push_log(
+                    Level::Info,
+                    format!("Update started: {}/{}{when}", creator.service.as_str(), creator.id),
+                );
+            }
+            UiEvent::UpdateStep(step) => {
+                if let Some(u) = &mut self.update {
+                    u.step = step;
+                    if step == UpdateStep::Saving {
+                        u.saving_since = Some(now);
+                    }
+                }
+                match step {
+                    UpdateStep::Reading => self.push_log(Level::Info, "Profile changed. Reading the post list."),
+                    UpdateStep::Page(p) => {
+                        self.scan_progress = p;
+                        self.scan_last_progress = Some(now);
+                    }
+                    UpdateStep::CheckingMissing { done: 0, total } => self.push_log(
+                        Level::Info,
+                        format!(
+                            "Checking {} {} missing from the list",
+                            total,
+                            if total == 1 { "post" } else { "posts" }
+                        ),
+                    ),
+                    UpdateStep::CheckingMissing { .. } => self.scan_last_progress = Some(now),
+                    UpdateStep::Checking | UpdateStep::Saving => {}
+                }
+            }
+            UiEvent::UpdateFailed { cause, saving } => {
+                if self.update.take().is_some() {
+                    let page = self.scan_progress.pages + 1;
+                    self.push_log(Level::Error, format!("Update stopped: {cause}. Saved profile unchanged."));
+                    self.notice = Some(Notice::Failed { page, cause, saving });
+                    self.cancel_requested = false;
+                    self.phase = Phase::Ready;
+                }
+            }
+            UiEvent::UpdateCancelled => {
+                if self.update.take().is_some() {
+                    self.push_log(Level::Info, "Update cancelled. Saved profile unchanged.");
+                    self.notice = Some(Notice::Cancelled);
+                    self.cancel_requested = false;
+                    self.phase = Phase::Ready;
+                }
+            }
+            UiEvent::ProfileLoaded(p) => self.apply_loaded(*p, now),
+            UiEvent::ProfileRemoved { creator } => {
+                let name = self
+                    .record_of(&creator)
+                    .map(|r| {
+                        r.name.clone().unwrap_or_else(|| format!("{} {}", r.creator.service.as_str(), r.creator.id))
+                    })
+                    .unwrap_or_else(|| format!("{} {}", creator.service.as_str(), creator.id));
+                self.push_log(Level::Info, format!("Removed “{name}” from the library. Downloaded files were kept."));
+                self.removed_note = Some(name);
+                if self.creator.as_ref() == Some(&creator) {
+                    self.close_profile();
+                }
+            }
+            UiEvent::FileMarks(marks) => {
+                if let Some(s) = &mut self.saved {
+                    if s.marks.len() == marks.len() {
+                        s.marks = marks;
+                        self.files_version += 1;
+                    }
+                }
+            }
             UiEvent::DownloadFinished(s) => {
                 if std::mem::take(&mut self.awaiting_checks) {
                     // The wait ended without a download (cancelled, or nothing left to fetch): the phase
@@ -816,14 +1109,9 @@ pub fn explain_failure(error: &str) -> String {
     }
 }
 
-/// Second line of the scan-error card: the cause, then what was found before it stopped.
-pub fn explain_scan_error(message: &str, posts: usize) -> String {
-    let found = match posts {
-        0 => "No posts were found before it stopped.".to_string(),
-        1 => "1 post was found before it stopped.".to_string(),
-        n => format!("{} posts were found before it stopped.", crate::format::comma(n)),
-    };
-    let cause = if let Some(code) = message
+/// The cause half of a scan card, in plain words.
+fn scan_cause(message: &str) -> String {
+    if let Some(code) = message
         .strip_prefix("server answered HTTP ")
         .and_then(|r| r.split(' ').next())
         .or_else(|| message.split("HTTP ").nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()))
@@ -836,8 +1124,22 @@ pub fn explain_scan_error(message: &str, posts: usize) -> String {
         "Couldn't reach pawchive.pw (connection timed out).".to_string()
     } else {
         "Couldn't reach pawchive.pw.".to_string()
+    }
+}
+
+/// Second line of the scan-error card: the cause, then what was found before it stopped.
+pub fn explain_scan_error(message: &str, posts: usize) -> String {
+    let found = match posts {
+        0 => "No posts were found before it stopped.".to_string(),
+        1 => "1 post was found before it stopped.".to_string(),
+        n => format!("{} posts were found before it stopped.", crate::format::comma(n)),
     };
-    format!("{cause} {found}")
+    format!("{} {found}", scan_cause(message))
+}
+
+/// First line of the update-stopped card: just the cause (the saved copy is intact, so no count of what was found).
+pub fn explain_update_cause(message: &str) -> String {
+    scan_cause(message)
 }
 
 #[cfg(test)]
@@ -1224,5 +1526,90 @@ mod tests {
         assert_eq!(m.slow_secs(now), None, "the global cool-down is Pawchive-only");
         m.tick(now + Duration::from_secs(61));
         assert_eq!(m.host_cooldown_secs(ExtHost::Drive, now + Duration::from_secs(61)), None);
+    }
+
+    // ---- the saved library (DAN-1661) ---------------------------------------------------------------
+
+    fn saved_record(posts: usize) -> ProfileRecord {
+        ProfileRecord {
+            creator: creator(),
+            name: Some("Test".into()),
+            site_updated: Some("2026-10-17T13:02:44".into()),
+            last_scanned_at: Some(1_800_000_000),
+            last_full_read_at: Some(1_800_000_000),
+            posts,
+            gone: 0,
+            last_change: None,
+        }
+    }
+
+    fn loaded(how: Loaded, posts: usize) -> UiEvent {
+        UiEvent::ProfileLoaded(Box::new(ProfileLoaded {
+            how,
+            record: saved_record(posts),
+            posts: vec![],
+            files: vec![],
+            marks: vec![],
+            links: vec![],
+            probing: 0,
+        }))
+    }
+
+    #[test]
+    fn a_failed_update_ends_ready_with_the_old_data_and_a_notice_the_next_scan_clears() {
+        let now = Instant::now();
+        let mut m = Model::default();
+        m.apply(UiEvent::Profiles(Ok(vec![saved_record(1_427)])), now);
+        m.apply(loaded(Loaded::Opened, 1_427), now);
+        assert_eq!((m.phase, m.posts), (Phase::Ready, 1_427));
+        m.apply(UiEvent::UpdateStarted { kind: UpdateKind::Update, creator: creator() }, now);
+        assert_eq!(m.phase, Phase::Scanning, "an update is a scan: the phase model is unchanged");
+        assert_eq!(m.update.map(|u| u.step), Some(UpdateStep::Checking));
+        assert!(m.saved.is_some(), "the saved copy stays while it runs");
+        m.apply(UiEvent::UpdateStep(UpdateStep::Reading), now);
+        m.apply(UiEvent::UpdateStep(UpdateStep::Page(ScanProgress { pages: 6, posts: 300, files: 1 })), now);
+        m.apply(UiEvent::UpdateFailed { cause: "server answered HTTP 503 for https://x".into(), saving: false }, now);
+        assert_eq!((m.phase, m.update.is_none()), (Phase::Ready, true));
+        assert_eq!(
+            m.notice,
+            Some(Notice::Failed { page: 7, cause: "server answered HTTP 503 for https://x".into(), saving: false })
+        );
+        assert_eq!(
+            explain_update_cause("server answered HTTP 503 for https://x"),
+            "pawchive.pw answered with an error (HTTP 503)."
+        );
+        assert!(m.saved.is_some() && m.scan_failure.is_none(), "not the first-scan error state");
+        assert!(m.log.back().unwrap().text.ends_with("Saved profile unchanged."));
+        m.apply(UiEvent::UpdateStarted { kind: UpdateKind::Full, creator: creator() }, now);
+        assert!(m.notice.is_none());
+        assert_eq!(m.update.map(|u| u.step), Some(UpdateStep::Reading), "a full rescan starts at reading");
+        m.apply(UiEvent::UpdateCancelled, now);
+        assert_eq!((m.phase, m.notice.clone()), (Phase::Ready, Some(Notice::Cancelled)));
+        m.apply(loaded(Loaded::Opened, 1_427), now);
+        assert!(m.notice.is_none(), "opening clears it");
+    }
+
+    #[test]
+    fn removing_the_open_profile_closes_it_and_remembers_the_name_for_the_footer() {
+        let now = Instant::now();
+        let mut m = Model::default();
+        m.apply(UiEvent::Profiles(Ok(vec![saved_record(3)])), now);
+        m.apply(loaded(Loaded::Opened, 3), now);
+        assert!(m.is_saved(&creator()) && m.library_on());
+        m.apply(UiEvent::ProfileRemoved { creator: creator() }, now);
+        assert_eq!((m.phase, m.creator.is_none(), m.saved.is_none()), (Phase::Empty, true, true));
+        assert_eq!(m.removed_note.as_deref(), Some("Test"));
+        m.apply(UiEvent::Profiles(Ok(vec![])), now);
+        assert!(!m.is_saved(&creator()));
+        // The first scan of a profile is not an update: no summary, no labels, the plain scan states.
+        m.apply(UiEvent::ScanStarted(target()), now);
+        assert!(m.removed_note.is_none() && m.update.is_none());
+        assert_eq!(m.phase, Phase::Scanning);
+        m.apply(loaded(Loaded::First, 3), now);
+        assert_eq!(m.phase, Phase::Ready);
+        assert!(matches!(m.saved.as_ref().map(|s| &s.how), Some(Loaded::First)));
+        // An opened profile reads as "sizes not measured": nothing is probing.
+        m.apply(loaded(Loaded::Opened, 3), now);
+        assert_eq!(m.sizing, Sizing::Finished { skipped: true });
     }
 }

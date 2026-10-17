@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "pawchive-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -2532,11 +2532,12 @@ dependencies = [
 
 [[package]]
 name = "pawchive-gui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "egui_kittest",
  "image",
+ "libc",
  "pawchive-core",
  "rfd",
 ]

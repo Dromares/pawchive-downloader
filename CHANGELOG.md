@@ -5,21 +5,51 @@ All notable changes to Pawchive Downloader are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-17
+
 ### Added
 
-- **Saved library and incremental scan (engine only; no screen uses it yet).** `pawchive-core` can keep a
-  per-profile library in `$XDG_DATA_HOME/pawchive-downloader/library.sqlite3`: posts, files and external
-  links, with each post's `edited` time and a content fingerprint. An update scan asks the profile whether
-  anything changed (one request), reads the whole post list only when it did, and reports new, updated and
-  gone posts. "Download new only" skips files already downloaded (by hash) and never overwrites a file: a
-  replaced file is saved beside the old one under a new name.
+- **Saved profiles.** The first scan of a creator is kept in a library
+  (`$XDG_DATA_HOME/pawchive-downloader/library.sqlite3`). Saved profiles are listed when the app starts, with
+  the time of the last scan; **Open** shows the saved copy without any request, and **Remove** forgets a
+  profile without touching a downloaded file. Removing also forgets its download history, so downloading the
+  profile again saves `name (2)` copies beside the old files; the confirmation says so before the click.
+- **Update and Full rescan.** The button reads **Update** when the link is a saved profile (Ctrl+U). It asks
+  Pawchive one question first and reads the post list only if the profile changed or the last full read is
+  a week old; a post that is missing from the list is asked for on its own before it is marked gone, because
+  the list can skip a live post. **Full rescan** reads every post regardless. The result is a headline such as
+  `12 new posts, 3 updated, 41 new files, 1 gone`, or `Up to date — 0 new posts, 0 updated`. An update that
+  fails or is cancelled changes nothing, and the card says so.
+- **Posts tab with New, Updated and Gone from site labels.** They belong to the most recent update that found
+  a change, survive restarts and updates that find nothing, and are replaced by the next change. A post
+  that Pawchive no longer lists keeps its label for as long as it is gone; one that comes back counts as
+  updated.
+- **Download new only** (the main button once a profile has downloaded files) fetches only what was never
+  downloaded; **Download all** keeps the old meaning and also refills a file you deleted, at its old place.
+  Neither replaces a file that is on disk.
+- The Files tab marks files that are already **Downloaded** and lists the ones still to fetch first.
 - **The window now has its own icon on X11.** The Pawchive icon is built into the program and set on the
   window, so the taskbar and Alt+Tab show it under X11 (and XWayland) even when the AppImage is not
   integrated with the desktop. This resolves the 0.1.0 known limitation "The window has no icon of its
   own yet" for X11.
 
+### Changed
+
+- The Files tab's filter chips (`All · Active · Queued · Done · Failed`) moved to their own row under the tabs,
+  to make room for the fifth tab.
+- Step 1 is 12 pt taller when a saved profile is open (the profile line and Full rescan).
+- The library schema is version 2: additive columns only, nothing rewritten, so a 0.2.x library (none was
+  ever released) opens unchanged. A library that cannot be opened (locked by a second copy, unreadable) is never
+  deleted or recreated: the app says so and works as 0.2.0 did.
+
 ### Known limitations
 
+- File sizes are not saved: a reopened profile shows sizes as "not measured" until a scan measures them.
+- "Downloaded" shows where the file was saved, not when.
+- Files Pawchive holds only a preview of are shown as *Not on Pawchive* in a saved profile (the library does not
+  keep the difference between "preview only" and "gone"); thumbnails of such images can still be saved as before.
+  The files of a post that is gone from the site are not listed in the Files tab; the Posts tab counts what was
+  saved from it.
 - **A native Wayland window still shows the desktop's default icon until the AppImage is integrated.**
   The graphics library this version uses (winit 0.30) cannot set a window icon on Wayland; Wayland
   desktops take it from the desktop entry, which an unintegrated AppImage does not install (for example

@@ -31,6 +31,36 @@ pub fn autoscan_url() -> Option<String> {
     debug_env("PAWCHIVE_DEV_AUTOSCAN")
 }
 
+/// Open this saved profile (its pawchive.pw link) as soon as the window opens. Debug builds only.
+pub fn autoopen() -> Option<String> {
+    debug_env("PAWCHIVE_DEV_AUTOOPEN")
+}
+
+/// Use Full rescan instead of Update for the autoscan. Debug builds only.
+pub fn full_rescan() -> bool {
+    debug_env("PAWCHIVE_DEV_FULL").is_some()
+}
+
+/// Show this tab (`posts`, `links`, `files`, `problems`, `log`) whenever a saved profile is loaded. Debug builds only.
+pub fn tab() -> Option<String> {
+    debug_env("PAWCHIVE_DEV_TAB")
+}
+
+/// Ask "Remove from your list?" for the first saved profile as soon as the list is known. Debug builds only.
+pub fn confirm_remove() -> bool {
+    debug_env("PAWCHIVE_DEV_CONFIRM_REMOVE").is_some()
+}
+
+/// Press Cancel on a running scan this many seconds after the window opens. Debug builds only.
+pub fn cancel_after_secs() -> Option<f64> {
+    debug_env("PAWCHIVE_DEV_CANCEL_AFTER_SECS").and_then(|v| v.parse().ok())
+}
+
+/// With AUTODOWNLOAD: download only what is new. Debug builds only.
+pub fn download_new_only() -> bool {
+    debug_env("PAWCHIVE_DEV_NEW_ONLY").is_some()
+}
+
 /// Start downloading everything into this directory as soon as a scan finishes. Debug builds only.
 pub fn autodownload_dir() -> Option<String> {
     debug_env("PAWCHIVE_DEV_AUTODOWNLOAD")

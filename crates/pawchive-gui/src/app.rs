@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Frame, Key, KeyboardShortcut, Margin, Modifiers};
 use pawchive_core::api::Hosts;
 use pawchive_core::classify::{Category, CustomExts};
+use pawchive_core::creator::CreatorRef;
 use pawchive_core::export;
 use pawchive_core::model::FileEntry;
 use pawchive_core::names::{creator_dir, post_dir};
-use pawchive_core::plan::{missing_with_thumbnail, plan_downloads, summarize, FileSummary, Selection};
+use pawchive_core::plan::{category_of, missing_with_thumbnail, plan_all, summarize, FileSummary, Selection};
 use pawchive_core::session::{Command, SessionHandle, UiEvent};
 use pawchive_core::settings::Settings;
 
@@ -26,9 +27,22 @@ use crate::theme::{self, Pal, LEFT_W, S4};
 /// is the one place that turns them into model changes and session commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    /// Scan, or Update when the link is a saved profile.
     Scan,
     CancelScan,
     Download,
+    /// Fetch only the files the library has not downloaded.
+    DownloadNew,
+    /// Read the whole post list of the open saved profile again.
+    FullRescan,
+    /// Open the n-th saved profile of the list.
+    OpenSaved(usize),
+    /// Ask before removing the n-th saved profile.
+    AskRemove(usize),
+    ConfirmRemove,
+    KeepProfile,
+    /// Back to the saved-profiles list.
+    BackToList,
     Pause,
     Resume,
     Cancel,
@@ -67,6 +81,7 @@ impl ExportFormat {
 pub enum Tab {
     Files,
     Links,
+    Posts,
     Problems,
     Log,
 }
@@ -96,6 +111,9 @@ pub struct ReadyRow {
     pub size: Option<u64>,
     /// The server answered 404 for this file when it was sized: listed, but it will not be saved.
     pub missing: bool,
+    /// The library has it as downloaded (saved profiles only), and where.
+    pub downloaded: bool,
+    pub saved_path: Option<PathBuf>,
 }
 
 pub struct App {
@@ -135,6 +153,11 @@ pub struct App {
     /// Row (in the visible list) with the keyboard ring, and the list's last scroll offset and height.
     pub(crate) link_focus: usize,
     pub(crate) link_view: (f32, f32),
+    /// The saved profile whose row shows "Remove from your list?".
+    pub(crate) remove_confirm: Option<CreatorRef>,
+    /// Keep (the safe button) has taken the focus for the confirm row now showing.
+    pub(crate) confirm_focused: bool,
+    new_cache: Option<(String, Sel)>,
     started: Instant,
     shot_done: bool,
     last_title: String,
@@ -190,13 +213,27 @@ impl App {
             link_notice: None,
             link_focus: 0,
             link_view: (0.0, 0.0),
+            remove_confirm: None,
+            confirm_focused: false,
+            new_cache: None,
             started: Instant::now(),
             shot_done: false,
             last_title: String::new(),
         };
         if let Some(url) = dev::autoscan_url() {
-            app.url = url;
-            app.perform(Action::Scan, ctx);
+            app.url = url.clone();
+            if dev::full_rescan() {
+                // The saved profile is not on screen yet, so this goes straight to the session.
+                app.handle.send(Command::FullRescan { url });
+            } else {
+                app.perform(Action::Scan, ctx);
+            }
+        }
+        if let Some(link) = dev::autoopen() {
+            if let Ok(c) = pawchive_core::creator::parse_creator_url(&link) {
+                app.url = Self::creator_url(&c);
+                app.handle.send(Command::OpenProfile(c));
+            }
         }
         app
     }
@@ -246,20 +283,39 @@ impl App {
             Some(creator) => {
                 let sel =
                     Selection { categories: derive::wanted(&self.checked), include_preview: self.include_preview };
-                let mut rows: Vec<ReadyRow> = plan_downloads(
+                let marks = self.model.saved.as_ref().map(|s| &s.marks);
+                let mut rows: Vec<ReadyRow> = plan_all(
                     creator,
                     &self.model.files,
                     &sel,
                     &CustomExts::parse(&self.custom_ext),
                     Path::new(""),
                     &Hosts::default(),
+                    None,
                 )
                 .into_iter()
-                .map(|j| {
-                    let (post, name) = j.label.rsplit_once('/').unwrap_or(("", j.label.as_str()));
-                    ReadyRow { post: post.to_string(), name: name.to_string(), size: j.expected_size, missing: false }
+                .map(|x| {
+                    let mark = x.file.and_then(|i| marks.and_then(|m| m.get(i)));
+                    let (post, name) = x.job.label.rsplit_once('/').unwrap_or(("", x.job.label.as_str()));
+                    let downloaded = mark.is_some_and(|m| m.downloaded);
+                    let saved_path = mark.and_then(|m| m.saved_path.clone());
+                    // A saved file is shown under the name it has on disk.
+                    let name = match (&saved_path, downloaded) {
+                        (Some(p), true) => p.file_name().map_or(name.to_string(), |n| n.to_string_lossy().into_owned()),
+                        _ => name.to_string(),
+                    };
+                    ReadyRow {
+                        post: post.to_string(),
+                        name,
+                        size: x.job.expected_size,
+                        missing: false,
+                        downloaded,
+                        saved_path,
+                    }
                 })
                 .collect();
+                // Files to fetch first, then the ones already saved (a stable sort keeps the site's order).
+                rows.sort_by_key(|r| r.downloaded);
                 // Gone files stay visible, marked, after the ones that will be saved. A missing image
                 // whose thumbnail is ticked is already above, as a `.thumb` job.
                 let thumb_saved = |f: &FileEntry| self.include_preview && missing_with_thumbnail(f);
@@ -268,6 +324,8 @@ impl App {
                     name: f.name.clone(),
                     size: None,
                     missing: true,
+                    downloaded: false,
+                    saved_path: None,
                 }));
                 rows
             }
@@ -276,6 +334,62 @@ impl App {
         let rows = Arc::new(rows);
         self.ready_cache = Some((key, rows.clone()));
         rows
+    }
+
+    /// What "Download new only" would fetch among the ticked types: the files the library has not
+    /// downloaded (`pending`). Thumbnails and external links are not part of it.
+    pub(crate) fn new_only(&mut self) -> Sel {
+        let mut cats: Vec<_> = self.checked.iter().copied().collect();
+        cats.sort();
+        let key = format!("{}|{}|{cats:?}", self.model.files_version, self.custom_ext);
+        if let Some((k, s)) = &self.new_cache {
+            if *k == key {
+                return *s;
+            }
+        }
+        let mut sel = Sel::default();
+        if let Some(saved) = &self.model.saved {
+            let wanted = derive::wanted(&self.checked);
+            let custom = CustomExts::parse(&self.custom_ext);
+            for (f, m) in self.model.files.iter().zip(&saved.marks) {
+                if m.pending && !f.missing && wanted.contains(&category_of(f, &custom)) {
+                    sel.files += 1;
+                    match f.size {
+                        Some(b) => sel.bytes += b,
+                        None => sel.unsized_files += 1,
+                    }
+                }
+            }
+            sel.partial = sel.unsized_files > 0;
+        }
+        self.new_cache = Some((key, sel));
+        sel
+    }
+
+    /// The URL button says `Update` when the link is a saved profile (or one is open and the field
+    /// is not a creator link), else `Scan`.
+    pub(crate) fn updating_link(&self) -> bool {
+        if !self.model.library_on() {
+            return false;
+        }
+        match crate::urlcheck::check(&self.url) {
+            Ok(t) => t.post_id.is_none() && self.model.is_saved(&t.creator),
+            Err(_) => self.model.saved.is_some(),
+        }
+    }
+
+    /// The saved profile the link in the field names, if any.
+    pub(crate) fn typed_saved(&self) -> Option<&pawchive_core::library::ProfileRecord> {
+        let t = crate::urlcheck::check(&self.url).ok()?;
+        if t.post_id.is_some() {
+            return None;
+        }
+        self.model.record_of(&t.creator)
+    }
+
+    /// `https://pawchive.pw/{service}/user/{id}` of a creator.
+    fn creator_url(c: &CreatorRef) -> String {
+        format!("https://pawchive.pw/{}/user/{}", c.service.as_str(), c.id)
     }
 
     pub(crate) fn has_folder(&self) -> bool {
@@ -301,9 +415,12 @@ impl App {
         match self.model.phase {
             Phase::Ready => {
                 let sel = self.selection();
-                derive::download_block(self.has_folder(), sel.files, self.all_gone())
-                    .is_none()
-                    .then_some(Action::Download)
+                let free = derive::download_block(self.has_folder(), sel.files, self.all_gone()).is_none();
+                if self.model.saved.as_ref().is_some_and(|s| s.has_history()) {
+                    // The primary button is "Download new only"; it is off when there is nothing new.
+                    return (free && self.new_only().files > 0).then_some(Action::DownloadNew);
+                }
+                free.then_some(Action::Download)
             }
             Phase::Downloading => Some(Action::Pause),
             Phase::Paused => Some(Action::Resume),
@@ -319,8 +436,20 @@ impl App {
     fn drain(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         while let Ok(ev) = self.rx.try_recv() {
-            let scan_done = matches!(ev, UiEvent::ScanFinished { .. });
+            let scan_done = match &ev {
+                UiEvent::ScanFinished { .. } => true,
+                UiEvent::ProfileLoaded(p) => !matches!(p.how, pawchive_core::session::Loaded::Updated(_)),
+                _ => false,
+            };
+            let removed = matches!(ev, UiEvent::ProfileRemoved { .. });
+            let loaded = matches!(ev, UiEvent::ProfileLoaded(_));
             self.model.apply(ev, now);
+            if removed {
+                self.remove_confirm = None;
+            }
+            if dev::confirm_remove() && self.remove_confirm.is_none() && self.model.phase == Phase::Empty {
+                self.remove_confirm = self.model.profiles().first().map(|p| p.creator.clone());
+            }
             if scan_done {
                 self.tab = if dev::open_links_tab() { Tab::Links } else { Tab::Files };
                 self.filter = Filter::All;
@@ -338,7 +467,19 @@ impl App {
                 }
                 if let Some(dir) = dev::autodownload_dir() {
                     self.output = dir;
-                    self.perform(Action::Download, ctx);
+                    self.perform(if dev::download_new_only() { Action::DownloadNew } else { Action::Download }, ctx);
+                }
+            }
+            // (After the scan_done reset above: a developer's tab choice wins.)
+            if loaded {
+                if let Some(t) = dev::tab() {
+                    self.tab = match t.as_str() {
+                        "posts" => Tab::Posts,
+                        "links" => Tab::Links,
+                        "problems" => Tab::Problems,
+                        "log" => Tab::Log,
+                        _ => Tab::Files,
+                    };
                 }
             }
         }
@@ -443,9 +584,65 @@ impl App {
                     Err(e) => self.url_error = Some(e),
                 }
             }
+            Action::FullRescan => {
+                // Only for the saved profile that is open, and never while something runs.
+                if !self.url_editable() || self.model.saved.is_none() {
+                    return;
+                }
+                if let Some(c) = self.model.creator.clone() {
+                    self.url_error = None;
+                    self.handle.send(Command::FullRescan { url: Self::creator_url(&c) });
+                }
+            }
+            Action::OpenSaved(i) => {
+                if self.model.phase != Phase::Empty {
+                    return;
+                }
+                if let Some(c) = self.model.profiles().get(i).map(|p| p.creator.clone()) {
+                    self.url = Self::creator_url(&c);
+                    self.url_error = None;
+                    self.remove_confirm = None;
+                    self.handle.send(Command::OpenProfile(c));
+                }
+            }
+            Action::AskRemove(i) => {
+                self.remove_confirm = self.model.profiles().get(i).map(|p| p.creator.clone());
+                self.confirm_focused = false;
+            }
+            Action::KeepProfile => self.remove_confirm = None,
+            Action::ConfirmRemove => {
+                if let Some(c) = self.remove_confirm.take() {
+                    self.handle.send(Command::RemoveProfile(c));
+                }
+            }
+            Action::BackToList => {
+                if self.model.phase.busy() || !self.model.library_on() {
+                    return;
+                }
+                self.model.close_profile();
+                self.model.removed_note = None;
+                self.remove_confirm = None;
+                self.url_error = None;
+            }
             Action::CancelScan | Action::Cancel => {
                 self.model.note_cancel();
                 self.handle.send(Command::Cancel);
+            }
+            Action::DownloadNew => {
+                if self.model.phase != Phase::Ready {
+                    return;
+                }
+                self.sync_settings(ctx, true);
+                self.handle.send(Command::DownloadNew {
+                    selection: Selection {
+                        categories: derive::wanted(&self.checked),
+                        include_preview: self.include_preview,
+                    },
+                    custom_extensions: self.custom_ext.clone(),
+                    output: PathBuf::from(self.output.trim()),
+                    links: self.model.links.iter().filter_map(crate::links_state::LinkRow::pick).collect(),
+                });
+                self.link_notice = None;
             }
             Action::Download => {
                 if !matches!(self.model.phase, Phase::Ready | Phase::Cancelled) {
@@ -617,8 +814,8 @@ impl App {
     /// `ui-spec` section 7. Consumed before any widget draws, so they work from a text field too.
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let hit = |key: Key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, key)));
-        let (focus_url, browse, primary, pause, settings, quit) =
-            (hit(Key::L), hit(Key::O), hit(Key::Enter), hit(Key::P), hit(Key::Comma), hit(Key::Q));
+        let (focus_url, browse, primary, pause, settings, quit, update) =
+            (hit(Key::L), hit(Key::O), hit(Key::Enter), hit(Key::P), hit(Key::Comma), hit(Key::Q), hit(Key::U));
         if self.settings_open || self.quit_open {
             return;
         }
@@ -627,6 +824,10 @@ impl App {
         }
         if browse {
             self.perform(Action::Browse, ctx);
+        }
+        // Ctrl+U runs the URL button when it says Update.
+        if update && self.updating_link() && !self.url.trim().is_empty() {
+            self.perform(Action::Scan, ctx);
         }
         if primary {
             if let Some(a) = self.primary_action() {
@@ -667,6 +868,12 @@ impl App {
     fn dev_hooks(&mut self, ctx: &egui::Context) {
         if dev::screenshots_enabled() && ctx.input(|i| i.key_pressed(Key::F12)) {
             dev::request_screenshot(ctx, self.note_tx.clone());
+        }
+        if let Some(secs) = dev::cancel_after_secs() {
+            if self.model.phase == Phase::Scanning && self.started.elapsed().as_secs_f64() >= secs {
+                self.perform(Action::CancelScan, ctx);
+            }
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
         if let Some(secs) = dev::shot_after_secs() {
             if !self.shot_done && self.started.elapsed().as_secs_f64() >= secs {
@@ -1144,5 +1351,465 @@ mod tests {
         let seen = labels(&ctx, &mut app);
         assert!(seen.iter().any(|l| l.starts_with("1 file · ")), "{seen:?}");
         assert!(!seen.iter().any(|l| l.contains("1 files")), "{seen:?}");
+    }
+
+    // ---- DAN-1661: saved profiles --------------------------------------------------------------------
+
+    use pawchive_core::creator::CreatorRef;
+    use pawchive_core::library::{ChangeSummary, PostLabel, PostRow, ProfileRecord};
+    use pawchive_core::model::Service;
+    use pawchive_core::session::{
+        FileMark, Loaded, ProfileLoaded, UiEvent as Ev, UpdateKind, UpdateReport, UpdateStep, UpdateSummary,
+    };
+
+    fn creator() -> CreatorRef {
+        CreatorRef { service: Service::Fanbox, id: "1549213".into() }
+    }
+
+    fn record(gone: usize) -> ProfileRecord {
+        ProfileRecord {
+            creator: creator(),
+            name: Some("DAGASI".into()),
+            site_updated: Some("2026-10-17T13:02:44".into()),
+            last_scanned_at: Some(unix_now_for_tests() - 3600),
+            last_full_read_at: Some(unix_now_for_tests() - 3600),
+            posts: 1_427,
+            gone,
+            last_change: Some(ChangeSummary {
+                at: unix_now_for_tests() - 3600,
+                new_posts: 12,
+                updated_posts: 3,
+                new_files: 41,
+                gone_posts: 1,
+            }),
+        }
+    }
+
+    fn unix_now_for_tests() -> i64 {
+        crate::library_state::unix_now()
+    }
+
+    fn entry(post: &str, name: &str, size: Option<u64>, missing: bool) -> FileEntry {
+        FileEntry {
+            post_id: post.into(),
+            post_title: format!("Post {post}"),
+            post_published: Some("2026-10-01T00:00:00".into()),
+            name: name.into(),
+            path: format!("/aa/{name}"),
+            preview_only: false,
+            node: None,
+            size,
+            content_type: None,
+            missing,
+        }
+    }
+
+    /// A saved profile on screen: 5 files (2 downloaded, 2 to fetch, 1 not on Pawchive) and 4 posts
+    /// carrying every label.
+    fn profile_loaded(how: Loaded, gone: usize) -> ProfileLoaded {
+        let row = |id: &str, label, files| PostRow {
+            post_id: id.into(),
+            title: format!("Post {id}"),
+            published: Some("2026-10-01T00:00:00".into()),
+            label,
+            files,
+        };
+        let mark = |downloaded, pending| FileMark { downloaded, pending, saved_path: None };
+        ProfileLoaded {
+            how,
+            record: record(gone),
+            posts: vec![
+                row("1", Some(PostLabel::New), 2),
+                row("2", Some(PostLabel::Updated), 1),
+                row("3", Some(PostLabel::Gone), 1),
+                row("4", None, 1),
+            ],
+            files: vec![
+                entry("1", "a.jpg", Some(1_000_000), false),
+                entry("1", "b.jpg", Some(2_000_000), false),
+                entry("2", "c.jpg", Some(3_000_000), false),
+                entry("4", "d.jpg", Some(4_000_000), false),
+                entry("3", "e.jpg", None, true),
+            ],
+            marks: vec![mark(false, true), mark(false, true), mark(true, false), mark(true, false), mark(false, false)],
+            links: vec![],
+            probing: 0,
+        }
+    }
+
+    fn saved_app(ctx: &egui::Context, how: Loaded) -> App {
+        let (handle, rx) = pawchive_core::session::spawn(
+            Settings::default(),
+            Hosts::default(),
+            pawchive_core::session::Tuning::default(),
+            Arc::new(|| {}),
+        );
+        let mut app = App::with_context(ctx, Settings::default(), handle, rx);
+        let now = Instant::now();
+        app.model.apply(Ev::Profiles(Ok(vec![record(0)])), now);
+        app.model.apply(Ev::ProfileLoaded(Box::new(profile_loaded(how, 1))), now);
+        app.output = "/tmp/pawchive-saved".into();
+        app
+    }
+
+    fn report(summary: UpdateSummary, unchanged: bool) -> Loaded {
+        Loaded::Updated(UpdateReport { kind: UpdateKind::Update, unchanged, summary, posts_seen: 1_427, requests: 1 })
+    }
+
+    fn has(seen: &[String], text: &str) -> bool {
+        seen.iter().any(|l| l.contains(text))
+    }
+
+    #[test]
+    fn the_saved_list_names_each_profile_and_asks_before_removing() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let (handle, rx) = pawchive_core::session::spawn(
+            Settings::default(),
+            Hosts::default(),
+            pawchive_core::session::Tuning::default(),
+            Arc::new(|| {}),
+        );
+        let mut app = App::with_context(&ctx, Settings::default(), handle, rx);
+        // An empty library: the guide and the first-run card, no list.
+        app.model.apply(Ev::Profiles(Ok(vec![])), Instant::now());
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "No saved profiles yet"), "{seen:?}");
+        assert!(!has(&seen, "Saved profiles"), "{seen:?}");
+        // One saved profile: the list, with the stated copy.
+        app.model.apply(Ev::Profiles(Ok(vec![record(2)])), Instant::now());
+        let seen = labels(&ctx, &mut app);
+        for want in [
+            "Saved profiles",
+            "DAGASI",
+            "fanbox · 1549213",
+            "Open",
+            "Remove",
+            "Today ",
+            "Removing a profile from this list",
+        ] {
+            assert!(has(&seen, want), "{want} missing: {seen:?}");
+        }
+        assert!(!has(&seen, "No saved profiles yet"));
+        // Remove asks first, names what is lost, and mentions the Gone posts when there are some.
+        app.perform(Action::AskRemove(0), &ctx);
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "Remove \u{201c}DAGASI\u{201d} from your list?"), "{seen:?}");
+        assert!(
+            has(
+                &seen,
+                "Your downloaded files stay in your folder. The saved post list and download history are deleted"
+            ),
+            "{seen:?}"
+        );
+        assert!(has(&seen, "2 posts marked Gone from site will be forgotten."), "{seen:?}");
+        assert!(has(&seen, "Keep"), "{seen:?}");
+        // Keep closes it without a request; nothing was removed.
+        app.perform(Action::KeepProfile, &ctx);
+        assert!(app.remove_confirm.is_none() && app.model.profiles().len() == 1);
+        // The footer gives way to the result line after a removal.
+        app.model.apply(Ev::ProfileRemoved { creator: creator() }, Instant::now());
+        app.model.apply(Ev::Profiles(Ok(vec![record(0)])), Instant::now());
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "Removed \u{201c}DAGASI\u{201d}. Downloaded files were kept."), "{seen:?}");
+    }
+
+    #[test]
+    fn the_url_button_says_update_for_a_saved_link_and_scan_otherwise() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let (handle, rx) = pawchive_core::session::spawn(
+            Settings::default(),
+            Hosts::default(),
+            pawchive_core::session::Tuning::default(),
+            Arc::new(|| {}),
+        );
+        let mut app = App::with_context(&ctx, Settings::default(), handle, rx);
+        app.model.apply(Ev::Profiles(Ok(vec![record(0)])), Instant::now());
+        app.url = "https://pawchive.pw/fanbox/user/1549213".into();
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l == "Update"), "{seen:?}");
+        assert!(has(&seen, "Already in your library · last scanned Today"), "{seen:?}");
+        app.url = "https://pawchive.pw/fanbox/user/999".into();
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l == "Scan") && !seen.iter().any(|l| l == "Update"), "{seen:?}");
+        // A post link of a saved creator is a one-post lookup: still Scan, and never saved.
+        app.url = "https://pawchive.pw/fanbox/user/1549213/post/5".into();
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l == "Scan"), "{seen:?}");
+        // Without a library nothing changes from v0.2.0.
+        let (handle, rx) = pawchive_core::session::spawn(
+            Settings::default(),
+            Hosts::default(),
+            pawchive_core::session::Tuning::default(),
+            Arc::new(|| {}),
+        );
+        let mut plain = App::with_context(&ctx, Settings::default(), handle, rx);
+        plain.url = "https://pawchive.pw/fanbox/user/1549213".into();
+        assert!(!plain.updating_link());
+    }
+
+    #[test]
+    fn an_opened_profile_says_what_it_is_and_offers_full_rescan_and_the_way_back() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = saved_app(&ctx, Loaded::Opened);
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "Saved profile — 1,427 posts, 5 files"), "{seen:?}");
+        assert!(has(&seen, "2 new files selected · "), "{seen:?}");
+        assert!(has(&seen, "Last scanned Today"), "{seen:?}");
+        assert!(has(&seen, "Last update found 12 new posts, 3 updated, 41 new files, 1 gone."), "{seen:?}");
+        assert!(has(&seen, "DAGASI · fanbox 1549213 · 1,427 posts"), "{seen:?}");
+        for want in ["Full rescan", "Saved profiles", "Posts 4"] {
+            assert!(seen.iter().any(|l| l == want || l.starts_with(want)), "{want}: {seen:?}");
+        }
+        assert!(seen.iter().any(|l| l == "Update"));
+    }
+
+    #[test]
+    fn the_bottom_bar_offers_new_only_once_there_is_history() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = saved_app(&ctx, Loaded::Opened);
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l == "Download new only (2)"), "{seen:?}");
+        assert!(seen.iter().any(|l| l == "Download all (4)"), "downloadable files, not the gone one: {seen:?}");
+        assert_eq!(app.primary_action(), Some(Action::DownloadNew), "Ctrl+Enter presses the primary");
+        // Nothing new: the primary is off, "Download all" stays on, and the reason is said.
+        let loaded = ProfileLoaded {
+            marks: profile_loaded(Loaded::Opened, 0)
+                .marks
+                .into_iter()
+                .map(|m| FileMark { pending: false, ..m })
+                .collect(),
+            ..profile_loaded(Loaded::Opened, 0)
+        };
+        app.model.apply(Ev::ProfileLoaded(Box::new(loaded)), Instant::now());
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l == "Download new only (0)"), "{seen:?}");
+        assert!(has(&seen, "Nothing new to download."), "{seen:?}");
+        assert_eq!(app.primary_action(), None);
+        // No history: exactly today's single button.
+        let fresh = ProfileLoaded {
+            marks: profile_loaded(Loaded::First, 0)
+                .marks
+                .into_iter()
+                .map(|m| FileMark { downloaded: false, ..m })
+                .collect(),
+            ..profile_loaded(Loaded::First, 0)
+        };
+        app.model.apply(Ev::ProfileLoaded(Box::new(fresh)), Instant::now());
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l == "Download 4"), "{seen:?}");
+        assert!(!has(&seen, "Download new only") && !has(&seen, "Download all"), "{seen:?}");
+        assert_eq!(app.primary_action(), Some(Action::Download));
+    }
+
+    #[test]
+    fn an_update_shows_its_steps_keeps_the_old_data_and_ends_on_the_summary() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = saved_app(&ctx, Loaded::Opened);
+        let now = Instant::now();
+        app.model.apply(Ev::UpdateStarted { kind: UpdateKind::Update, creator: creator() }, now);
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "Checking the profile…"), "{seen:?}");
+        assert!(has(&seen, "One request to Pawchive: has anything changed since Today"), "{seen:?}");
+        // Controls: Cancel replaces the URL button, Full rescan and the way back are off, the old data stays.
+        assert!(seen.iter().any(|l| l == "Cancel") && seen.iter().any(|l| l == "Cancel scan"), "{seen:?}");
+        assert!(has(&seen, "Updating. Download unlocks when it finishes."), "{seen:?}");
+        assert!(has(&seen, "Posts 4") && has(&seen, "Files 5"), "the previous data stays: {seen:?}");
+        assert!(!has(&seen, "Download new only") && !has(&seen, "Download all"), "{seen:?}");
+        assert!(!has(&seen, "The file list appears when the scan finishes."), "{seen:?}");
+        assert!(!seen.iter().any(|l| l == "…"), "saved counts stay, not …: {seen:?}");
+        assert_eq!(crate::derive::window_title(&app.model, now), "Checking… — Pawchive Downloader");
+        // Reading: the counter, the estimate and the promise.
+        app.model.apply(Ev::UpdateStep(UpdateStep::Reading), now);
+        app.model.apply(
+            Ev::UpdateStep(UpdateStep::Page(pawchive_core::api::ScanProgress { pages: 14, posts: 700, files: 3000 })),
+            now,
+        );
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "Reading the post list…"), "{seen:?}");
+        assert!(has(&seen, "page 14 of about 29 · 700 posts read"), "{seen:?}");
+        assert!(
+            has(&seen, "About 29 s at one request per second. Your saved copy isn't changed until this finishes."),
+            "{seen:?}"
+        );
+        assert_eq!(crate::derive::window_title(&app.model, now), "Updating… page 14 of about 29 — Pawchive Downloader");
+        // Missing posts.
+        app.model.apply(Ev::UpdateStep(UpdateStep::CheckingMissing { done: 1, total: 3 }), now);
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "Checking posts missing from the list…") && has(&seen, "1 of 3 posts checked"), "{seen:?}");
+        assert!(
+            has(&seen, "Each is checked on its own before it's marked Gone from site. Nothing is changed yet."),
+            "{seen:?}"
+        );
+        // Done: the summary is the headline.
+        let summary = UpdateSummary { new_posts: 12, updated_posts: 3, new_files: 41, gone_posts: 1 };
+        app.model.apply(Ev::ProfileLoaded(Box::new(profile_loaded(report(summary, false), 1))), now);
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l == "12 new posts, 3 updated, 41 new files, 1 gone"), "{seen:?}");
+        assert!(
+            has(&seen, "Updated Today") && has(&seen, "Open the Posts tab to see which posts changed."),
+            "{seen:?}"
+        );
+        assert_eq!(app.tab, Tab::Files, "the app never switches tabs by itself");
+        // Nothing found: the zero case, both wordings.
+        let zero = UpdateSummary::default();
+        app.model.apply(Ev::ProfileLoaded(Box::new(profile_loaded(report(zero, true), 1))), now);
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l == "Up to date — 0 new posts, 0 updated"), "{seen:?}");
+        assert!(has(&seen, "0 new files. 2 files are already downloaded."), "{seen:?}");
+        assert!(
+            has(&seen, "Pawchive reports no changes since 2026-10-17 13:02. Full rescan checks every post anyway."),
+            "{seen:?}"
+        );
+        app.model.apply(Ev::ProfileLoaded(Box::new(profile_loaded(report(zero, false), 1))), now);
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "All 1,427 posts were read and none changed."), "{seen:?}");
+    }
+
+    #[test]
+    fn a_failed_or_cancelled_update_says_nothing_was_lost() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = saved_app(&ctx, Loaded::Opened);
+        let now = Instant::now();
+        app.model.apply(Ev::UpdateStarted { kind: UpdateKind::Full, creator: creator() }, now);
+        app.model.apply(
+            Ev::UpdateStep(UpdateStep::Page(pawchive_core::api::ScanProgress { pages: 13, posts: 650, files: 1 })),
+            now,
+        );
+        app.model.apply(Ev::UpdateFailed { cause: "request failed: operation timed out".into(), saving: false }, now);
+        assert_eq!(app.model.phase, Phase::Ready);
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "Update stopped at page 14"), "{seen:?}");
+        assert!(has(&seen, "Couldn't reach pawchive.pw (connection timed out)."), "{seen:?}");
+        assert!(has(&seen, "Nothing was changed. Your saved copy is intact. Update again starts over."), "{seen:?}");
+        assert!(has(&seen, "Posts 4"), "the old data is still on screen: {seen:?}");
+        for word in ["lost", "discarded", "aren't kept", "retry continues"] {
+            assert!(!seen.iter().any(|l| l.contains(word)), "forbidden word {word}: {seen:?}");
+        }
+        app.model.apply(Ev::UpdateStarted { kind: UpdateKind::Update, creator: creator() }, now);
+        app.model.apply(Ev::UpdateCancelled, now);
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "Update cancelled") && has(&seen, "Nothing was changed."), "{seen:?}");
+        assert!(has(&seen, "Your saved copy from Today") && has(&seen, "is intact: 1,427 posts, 5 files."), "{seen:?}");
+        // A write that failed at the end has its own headline.
+        app.model.apply(Ev::UpdateStarted { kind: UpdateKind::Update, creator: creator() }, now);
+        app.model.apply(Ev::UpdateFailed { cause: "library database: disk full".into(), saving: true }, now);
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "Couldn't save the update") && has(&seen, "library database: disk full"), "{seen:?}");
+        // The next scan clears the notice.
+        app.model.apply(Ev::UpdateStarted { kind: UpdateKind::Update, creator: creator() }, now);
+        assert!(app.model.notice.is_none());
+    }
+
+    #[test]
+    fn the_posts_tab_shows_the_labels_the_anchor_and_filters_without_reordering() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = saved_app(&ctx, Loaded::Opened);
+        app.tab = Tab::Posts;
+        let seen = labels(&ctx, &mut app);
+        for want in ["Label: New", "Label: Updated", "Label: × Gone from site", "All 4", "New 1", "Updated 1", "Gone 1"]
+        {
+            assert!(has(&seen, want), "{want} missing: {seen:?}");
+        }
+        assert!(has(&seen, "Labels from the update on Today"), "{seen:?}");
+        assert!(has(&seen, "· 1 gone"), "{seen:?}");
+        app.model.post_filter = crate::library_state::PostFilter::Gone;
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "Label: × Gone from site") && !has(&seen, "Label: New"), "{seen:?}");
+        // An empty filter says so.
+        let mut none = profile_loaded(Loaded::Opened, 0);
+        none.posts.retain(|p| p.label != Some(PostLabel::Gone));
+        app.model.apply(Ev::ProfileLoaded(Box::new(none)), Instant::now());
+        app.model.post_filter = crate::library_state::PostFilter::Gone;
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "No posts match this filter."), "{seen:?}");
+        // After the baseline scan there is nothing to label yet.
+        let mut base = profile_loaded(Loaded::First, 0);
+        base.record.last_change = None;
+        for p in &mut base.posts {
+            p.label = None;
+        }
+        app.model.apply(Ev::ProfileLoaded(Box::new(base)), Instant::now());
+        app.tab = Tab::Posts;
+        let seen = labels(&ctx, &mut app);
+        assert!(
+            has(&seen, "No labels yet. New, Updated and Gone from site appear after your next update."),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_library_that_could_not_be_opened_is_explained_and_the_app_still_scans() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let (handle, rx) = pawchive_core::session::spawn(
+            Settings::default(),
+            Hosts::default(),
+            pawchive_core::session::Tuning::default(),
+            Arc::new(|| {}),
+        );
+        let mut app = App::with_context(&ctx, Settings::default(), handle, rx);
+        app.model
+            .apply(Ev::Profiles(Err("Couldn't open library.sqlite3: the database is locked.".into())), Instant::now());
+        app.url = "https://pawchive.pw/fanbox/user/1549213".into();
+        let seen = labels(&ctx, &mut app);
+        assert!(has(&seen, "Your library couldn't be opened"), "{seen:?}");
+        assert!(has(&seen, "Couldn't open library.sqlite3: the database is locked."), "{seen:?}");
+        assert!(
+            has(&seen, "You can still scan and download, but profiles won't be saved or listed until this is fixed."),
+            "{seen:?}"
+        );
+        assert!(seen.iter().any(|l| l == "Scan"), "Scan, not Update: {seen:?}");
+        assert!(!has(&seen, "No saved profiles yet"), "{seen:?}");
+    }
+
+    /// ui-spec-library §3: URL, the URL button, Full rescan, `Saved profiles`, then the type rows.
+    #[test]
+    fn tab_order_in_step_one_is_url_button_full_rescan_back_link() {
+        use std::collections::HashMap;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = saved_app(&ctx, Loaded::Opened);
+        app.url = "https://pawchive.pw/fanbox/user/1549213".into(); // Open fills the field; the button needs a link
+        let mut nodes: HashMap<egui::accesskit::NodeId, String> = HashMap::new();
+        let mut frame = |app: &mut App, tab: bool| -> Option<String> {
+            let events = if tab { vec![key_event(Key::Tab, Modifiers::NONE)] } else { vec![] };
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1120.0, 760.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| app.draw(ui));
+            let update = out.platform_output.accesskit_update.take();
+            out.drop_without_applying_deltas();
+            let update = update?;
+            for (id, node) in update.nodes {
+                let name =
+                    node.label().or_else(|| node.value()).map_or_else(|| format!("{:?}", node.role()), str::to_string);
+                nodes.insert(id, name);
+            }
+            nodes.get(&update.focus).cloned()
+        };
+        for _ in 0..3 {
+            frame(&mut app, false);
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..12 {
+            frame(&mut app, true);
+            let Some(name) = frame(&mut app, false) else { continue };
+            if seen.first() == Some(&name) {
+                break;
+            }
+            seen.push(name);
+        }
+        let at = |n: &str| seen.iter().position(|x| x == n).unwrap_or_else(|| panic!("{n} missing: {seen:?}"));
+        assert!(at("Update") < at("Full rescan") && at("Full rescan") < at("Saved profiles"), "{seen:?}");
+        assert!(at("Saved profiles") < at("Images"), "{seen:?}");
     }
 }

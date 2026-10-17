@@ -16,7 +16,7 @@ use pawchive_core::creator::CreatorRef;
 use pawchive_core::engine::{Engine, EngineConfig, Event};
 use pawchive_core::gate::Gate;
 use pawchive_core::http::{Http, RetryPolicy};
-use pawchive_core::library::{Library, PostState, ScanMode, ScanOutcome, FULL_READ_MAX_AGE_SECS};
+use pawchive_core::library::{Library, PostLabel, PostState, ScanMode, ScanOutcome, ScanStep, FULL_READ_MAX_AGE_SECS};
 use pawchive_core::model::Service;
 use pawchive_core::settings::Settings;
 use serde_json::{json, Value};
@@ -361,7 +361,11 @@ async fn a_post_that_answers_404_is_gone_and_one_that_comes_back_is_restored() {
     f.world().set_posts(small_posts());
     f.world().set_updated("u4");
     let back = f.scan(ScanMode::Update).await;
-    assert_eq!((back.gone_posts, back.new_posts, back.updated_posts), (0, 0, 0));
+    // A post that comes back counts as updated (ui-spec-library section 6, DAN-1661): it was
+    // `(0, 0, 0)` in the first version of this test.
+    assert_eq!((back.gone_posts, back.new_posts, back.updated_posts), (0, 0, 1));
+    assert_eq!(back.changes.len(), 1);
+    assert_eq!(back.changes[0].state, PostState::Updated);
     let p = f.lib.posts(&f.creator).unwrap().into_iter().find(|p| p.post_id == victim).unwrap();
     assert_eq!(p.removed_at, None);
 }
@@ -644,8 +648,8 @@ async fn a_scan_interrupted_mid_way_leaves_every_saved_row_as_it_was() {
     let c2 = control.clone();
     let err = f
         .lib
-        .scan(&f.client, &f.creator, ScanMode::Update, &control, move |p| {
-            if p.pages == 1 {
+        .scan(&f.client, &f.creator, ScanMode::Update, &control, move |step| {
+            if matches!(step, ScanStep::Page(p) if p.pages == 1) {
                 c2.cancel();
             }
         })
@@ -740,4 +744,525 @@ fn the_data_directory_is_a_parameter_and_is_created_on_open() {
     assert!(lib.path().ends_with("nested/data/library.sqlite3"));
     assert!(lib.path().exists());
     assert!(lib.profiles().unwrap().is_empty());
+}
+
+// ---- DAN-1661: labels, change summary, steps, loading, refilling -----------------------------
+
+fn labels(f: &Fixture) -> HashMap<String, Option<PostLabel>> {
+    let at = f.lib.profile(&f.creator).unwrap().unwrap().last_change.map(|c| c.at);
+    f.lib.posts(&f.creator).unwrap().into_iter().map(|p| (p.post_id.clone(), p.label(at))).collect()
+}
+
+fn count_of(l: &HashMap<String, Option<PostLabel>>, which: Option<PostLabel>) -> usize {
+    l.values().filter(|x| **x == which).count()
+}
+
+/// D1: New / Updated belong to the most recent update that found a change, survive restarts and
+/// updates that find nothing, and are replaced by the next update that finds something. Gone stays
+/// while the post is gone; a post that comes back is Updated.
+#[tokio::test]
+async fn labels_belong_to_the_last_update_that_found_a_change() {
+    let f = fixture(fanbox("119251"), small_posts(), "u1").await;
+    f.scan(ScanMode::Update).await;
+    let first = f.lib.profile(&f.creator).unwrap().unwrap();
+    assert_eq!(first.last_change, None, "a first scan is a baseline, not a change");
+    assert!(labels(&f).values().all(Option::is_none), "no labels after the baseline scan");
+
+    // Update 1: one added, one edited, one removed.
+    tick(&f, 100);
+    let posts = small_posts();
+    let (edited_id, gone_id) = (id_of(&posts[0]), id_of(&posts[1]));
+    {
+        let mut p = posts.clone();
+        p.remove(1);
+        p[0]["edited"] = json!("2026-10-17T05:14:43");
+        let mut added = p[0].clone();
+        added["id"] = json!("99999999");
+        added["title"] = json!("Brand new");
+        added["file"] = json!({"name": "new.png", "path": format!("/aa/bb/{}.png", "a".repeat(64))});
+        added["attachments"] = json!([]);
+        p.insert(0, added);
+        f.world().set_posts(p);
+        f.world().set_updated("u2");
+    }
+    let u1 = f.scan(ScanMode::Update).await;
+    assert_eq!((u1.new_posts, u1.updated_posts, u1.gone_posts, u1.new_files), (1, 1, 1, 1));
+    let rec = f.lib.profile(&f.creator).unwrap().unwrap();
+    let c = rec.last_change.expect("an update that found a change");
+    assert_eq!((c.new_posts, c.updated_posts, c.new_files, c.gone_posts), (1, 1, 1, 1));
+    let l = labels(&f);
+    assert_eq!(l["99999999"], Some(PostLabel::New));
+    assert_eq!(l[&edited_id], Some(PostLabel::Updated));
+    assert_eq!(l[&gone_id], Some(PostLabel::Gone));
+    assert_eq!((count_of(&l, Some(PostLabel::New)), count_of(&l, Some(PostLabel::Updated))), (1, 1));
+
+    // They survive a restart ...
+    let again = Library::open(f.data_dir.path()).unwrap();
+    let rec2 = again.profile(&f.creator).unwrap().unwrap();
+    assert_eq!(rec2.last_change, rec.last_change);
+    // ... and an update that finds nothing (quick path, then a full read that changes nothing).
+    tick(&f, 100);
+    assert!(f.scan(ScanMode::Update).await.unchanged);
+    tick(&f, 100);
+    f.world().set_updated("u3");
+    let nothing = f.scan(ScanMode::Update).await;
+    assert_eq!((nothing.new_posts, nothing.updated_posts, nothing.gone_posts), (0, 0, 0));
+    assert_eq!(labels(&f), l, "an update that finds nothing leaves the labels alone");
+    assert_eq!(f.lib.profile(&f.creator).unwrap().unwrap().last_change, rec.last_change);
+
+    // Update 2 finds a different change: the old New / Updated labels go, Gone stays.
+    tick(&f, 100);
+    {
+        let mut p = f.world().listing.clone();
+        let last = p.len() - 1;
+        p[last]["edited"] = json!("2026-10-17T09:09:09");
+        f.world().set_posts(p);
+        f.world().set_updated("u4");
+    }
+    let u2 = f.scan(ScanMode::Update).await;
+    assert_eq!((u2.new_posts, u2.updated_posts, u2.gone_posts), (0, 1, 0));
+    let l2 = labels(&f);
+    assert_eq!(l2["99999999"], None, "the earlier New is replaced");
+    assert_eq!(l2[&edited_id], None, "the earlier Updated is replaced");
+    assert_eq!(l2[&gone_id], Some(PostLabel::Gone), "Gone stays for as long as the post is gone");
+    assert_eq!(count_of(&l2, Some(PostLabel::Updated)), 1);
+
+    // The post comes back: Gone clears and it is Updated.
+    tick(&f, 100);
+    {
+        let mut p = f.world().listing.clone();
+        p.push(posts[1].clone());
+        f.world().set_posts(p);
+        f.world().set_updated("u5");
+    }
+    let back = f.scan(ScanMode::Update).await;
+    assert_eq!((back.new_posts, back.updated_posts, back.gone_posts), (0, 1, 0));
+    assert_eq!(labels(&f)[&gone_id], Some(PostLabel::Updated));
+}
+
+/// Two scans that read the same clock second must still give the second scan's posts their own stamp.
+#[tokio::test]
+async fn a_second_scan_in_the_same_second_does_not_relabel_the_baseline_as_new() {
+    let f = fixture(fanbox("119251"), small_posts(), "u1").await;
+    f.scan(ScanMode::Update).await;
+    {
+        let mut p = f.world().listing.clone();
+        p[1]["edited"] = json!("2026-10-17T05:14:43");
+        f.world().set_posts(p);
+        f.world().set_updated("u2");
+    }
+    f.scan(ScanMode::Update).await; // the clock never moved
+    let l = labels(&f);
+    assert_eq!((count_of(&l, Some(PostLabel::New)), count_of(&l, Some(PostLabel::Updated))), (0, 1), "{l:?}");
+}
+
+#[tokio::test]
+async fn a_scan_reports_its_steps_in_order() {
+    let f = fixture(fanbox("119251"), two_page_posts(), "u1").await;
+    let steps = || {
+        let log = Arc::new(Mutex::new(Vec::<ScanStep>::new()));
+        let l2 = log.clone();
+        (log, move |s| l2.lock().unwrap().push(s))
+    };
+    let run = |mode: ScanMode| {
+        let (log, cb) = steps();
+        let f = &f;
+        async move {
+            f.lib.scan(&f.client, &f.creator, mode, &Control::new(), cb).await.unwrap();
+            let v = log.lock().unwrap().clone();
+            v
+        }
+    };
+    // First scan: Checking, Reading, two pages. Nothing to check afterwards.
+    let first = run(ScanMode::Update).await;
+    assert_eq!(first[0], ScanStep::Checking);
+    assert_eq!(first[1], ScanStep::Reading);
+    assert!(matches!(first[2], ScanStep::Page(p) if p.pages == 1));
+    assert!(matches!(first[3], ScanStep::Page(p) if p.pages == 2));
+    assert_eq!(first[4], ScanStep::Saving);
+    assert_eq!(first.len(), 5);
+    // Unchanged: Checking and nothing else.
+    assert_eq!(run(ScanMode::Update).await, vec![ScanStep::Checking]);
+    // (no Saving: an unchanged profile writes nothing but its scan time)
+    // Full rescan: no Checking, goes straight to reading.
+    let full = run(ScanMode::Full).await;
+    assert_eq!(full[0], ScanStep::Reading);
+    // One saved post missing from the list: Missing 0 of 1, then 1 of 1.
+    {
+        let mut p = f.world().listing.clone();
+        p.remove(1);
+        f.world().set_posts(p);
+        f.world().set_updated("u2");
+    }
+    let missing = run(ScanMode::Update).await;
+    let tail: Vec<_> = missing.iter().rev().take(3).rev().cloned().collect();
+    assert_eq!(
+        tail,
+        vec![ScanStep::Missing { done: 0, total: 1 }, ScanStep::Missing { done: 1, total: 1 }, ScanStep::Saving]
+    );
+}
+
+#[tokio::test]
+async fn load_returns_the_post_list_files_and_links_as_the_screen_wants_them() {
+    let f = fixture(fanbox("119251"), small_posts(), "u1").await;
+    assert!(f.lib.load(&f.creator).unwrap().is_none());
+    f.scan(ScanMode::Update).await;
+    let before = f.lib.load(&f.creator).unwrap().unwrap();
+    assert_eq!(before.posts.len(), 3);
+    assert!(before.files.iter().all(|x| !x.downloaded && x.pending == !x.entry.missing));
+    f.download().await;
+    let after = f.lib.load(&f.creator).unwrap().unwrap();
+    assert_eq!(after.files.len(), before.files.len());
+    assert!(after.files.iter().all(|x| x.downloaded && !x.pending && x.saved_path.is_some()));
+    assert_eq!(after.record.posts, 3);
+
+    // Pawchive holds no copy of any file of this profile: every one comes back as missing, none pending.
+    let g = fixture(fanbox("1386751"), no_edited_posts(), "u1").await;
+    g.scan(ScanMode::Update).await;
+    let gone = g.lib.load(&g.creator).unwrap().unwrap();
+    assert!(!gone.files.is_empty());
+    assert!(gone.files.iter().all(|x| x.entry.missing && !x.pending && !x.downloaded));
+}
+
+/// Download all fills a gap at the old place and never overwrites; a file that is there is left alone.
+#[tokio::test]
+async fn downloading_everything_refills_a_deleted_file_in_place_and_leaves_the_rest_alone() {
+    let f = fixture(fanbox("119251"), small_posts(), "u1").await;
+    f.scan(ScanMode::Update).await;
+    f.download().await;
+    let loaded = f.lib.load(&f.creator).unwrap().unwrap();
+    let victim = loaded.files.iter().find(|x| x.saved_path.is_some()).unwrap().clone();
+    let victim_path = victim.saved_path.clone().unwrap();
+    let other = loaded.files.iter().find(|x| x.saved_path != victim.saved_path).unwrap().clone();
+    let other_path = other.saved_path.clone().unwrap();
+    let other_bytes = std::fs::read(&other_path).unwrap();
+    std::fs::remove_file(&victim_path).unwrap();
+
+    let keys: std::collections::HashSet<(String, String)> =
+        loaded.files.iter().map(|x| (x.entry.post_id.clone(), x.entry.path.clone())).collect();
+    assert!(f.lib.download_candidates(&f.creator, &keys, true).unwrap().is_empty(), "new only: nothing is new");
+    let all = f.lib.download_candidates(&f.creator, &keys, false).unwrap();
+    assert_eq!(all.len(), loaded.files.len());
+
+    let mut plan = f.lib.plan_download(&f.creator, f.out_dir.path(), all).unwrap();
+    for j in &mut plan.jobs {
+        let t = &plan.targets[&j.id];
+        j.url = f.client.hosts.full_url(&t.path);
+    }
+    let dests: Vec<_> = plan.jobs.iter().map(|j| j.dest.clone()).collect();
+    assert!(dests.contains(&victim_path), "the gap is refilled at the old place");
+    assert!(!dests.iter().any(|d| d.to_string_lossy().contains(" (2)")), "no new name for a file that is known");
+    let events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let e2 = events.clone();
+    let summary = f
+        .engine()
+        .with_no_replace()
+        .run(plan.jobs.clone(), Control::new(), move |ev| e2.lock().unwrap().push(ev))
+        .await;
+    assert_eq!((summary.done, summary.failed), (1, 0), "only the deleted file is fetched: {summary:?}");
+    assert_eq!(summary.skipped, loaded.files.len() - 1);
+    assert_eq!(std::fs::read(&victim_path).unwrap(), body_of(&victim.entry.path));
+    assert_eq!(std::fs::read(&other_path).unwrap(), other_bytes);
+}
+
+// ---- DAN-1661: the session around the library ------------------------------------------------
+
+mod session_flow {
+    use super::*;
+    use pawchive_core::classify::Category;
+    use pawchive_core::plan::Selection;
+    use pawchive_core::session::{
+        spawn_with_library, Command, Loaded, SessionHandle, Tuning, UiEvent, UpdateKind, UpdateStep,
+    };
+    use std::sync::mpsc::Receiver;
+
+    struct Run {
+        f: Fixture,
+        handle: SessionHandle,
+        rx: Receiver<UiEvent>,
+        url: String,
+    }
+
+    async fn run(posts: Vec<Value>) -> Run {
+        run_for(fanbox("119251"), posts).await
+    }
+
+    async fn run_for(creator: CreatorRef, posts: Vec<Value>) -> Run {
+        let f = fixture(creator, posts, "u1").await;
+        let lib = Library::open(f.data_dir.path()).unwrap().with_clock({
+            let c = f.clock.clone();
+            move || *c.lock().unwrap()
+        });
+        let tuning = Tuning {
+            retry: RetryPolicy { max_tries: 1, base: Duration::from_millis(1), ..Default::default() },
+            delay_override: Some(Duration::from_millis(1)),
+        };
+        let (handle, rx) =
+            spawn_with_library(Settings::default(), f.client.hosts.clone(), tuning, Arc::new(|| {}), Some(Ok(lib)));
+        let url = format!("https://pawchive.pw/fanbox/user/{}", f.creator.id);
+        Run { f, handle, rx, url }
+    }
+
+    /// Events until one matches; everything before it is returned too.
+    fn until<T>(rx: &Receiver<UiEvent>, mut pick: impl FnMut(&UiEvent) -> Option<T>) -> (Vec<UiEvent>, T) {
+        let mut seen = Vec::new();
+        loop {
+            let ev = rx.recv_timeout(Duration::from_secs(20)).expect("an event");
+            if let Some(t) = pick(&ev) {
+                return (seen, t);
+            }
+            seen.push(ev);
+        }
+    }
+
+    fn loaded(rx: &Receiver<UiEvent>) -> (Vec<UiEvent>, pawchive_core::session::ProfileLoaded) {
+        until(rx, |e| match e {
+            UiEvent::ProfileLoaded(p) => Some((**p).clone()),
+            UiEvent::ScanFailed(m) | UiEvent::UpdateFailed { cause: m, .. } => panic!("failed: {m}"),
+            _ => None,
+        })
+    }
+
+    fn download_all() -> Selection {
+        Selection { categories: Category::ALL.into_iter().collect(), include_preview: false }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn the_list_is_announced_then_a_first_scan_saves_and_open_and_update_follow() {
+        let r = run(small_posts()).await;
+        let (_, list) = until(&r.rx, |e| match e {
+            UiEvent::Profiles(l) => Some(l.clone()),
+            _ => None,
+        });
+        assert_eq!(list.unwrap().len(), 0, "an empty library is announced");
+
+        r.handle.send(Command::Scan { url: r.url.clone() });
+        let (before, first) = loaded(&r.rx);
+        assert!(before.iter().any(|e| matches!(e, UiEvent::ScanStarted(_))));
+        assert!(!before.iter().any(|e| matches!(e, UiEvent::UpdateStarted { .. })), "a first scan is not an update");
+        assert_eq!(first.how, Loaded::First);
+        assert_eq!(first.record.posts, 3);
+        assert_eq!(first.files.len(), first.marks.len());
+        assert!(first.marks.iter().all(|m| !m.downloaded));
+        let (_, list) = until(&r.rx, |e| match e {
+            UiEvent::Profiles(l) => Some(l.clone()),
+            _ => None,
+        });
+        assert_eq!(list.unwrap()[0].creator, r.f.creator);
+
+        // Opening it again makes no request at all (the background sizing of the first scan is done).
+        until(&r.rx, |e| matches!(e, UiEvent::SizingFinished { .. }).then_some(()));
+        let hits = r.f.requests();
+        r.handle.send(Command::OpenProfile(r.f.creator.clone()));
+        let (_, opened) = loaded(&r.rx);
+        assert_eq!(opened.how, Loaded::Opened);
+        assert_eq!(opened.files.len(), first.files.len());
+        assert_eq!(opened.probing, 0);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(r.f.requests(), hits, "Open reads the library only");
+
+        // Updating an unchanged profile: Checking, then the quick answer, one request.
+        let hits = r.f.requests();
+        r.handle.send(Command::Scan { url: r.url.clone() });
+        let (events, updated) = loaded(&r.rx);
+        assert!(
+            events.iter().any(|e| matches!(e, UiEvent::UpdateStarted { kind: UpdateKind::Update, .. })),
+            "{events:?}"
+        );
+        assert!(events.iter().any(|e| matches!(e, UiEvent::UpdateStep(UpdateStep::Checking))));
+        assert!(!events.iter().any(|e| matches!(e, UiEvent::UpdateStep(UpdateStep::Reading))));
+        let Loaded::Updated(rep) = &updated.how else { panic!("{:?}", updated.how) };
+        assert!(rep.unchanged);
+        assert_eq!(rep.requests, 1);
+        assert_eq!(r.f.requests() - hits, 1);
+
+        // A full rescan reads the list although nothing changed.
+        r.handle.send(Command::FullRescan { url: r.url.clone() });
+        let (events, full) = loaded(&r.rx);
+        assert!(events.iter().any(|e| matches!(e, UiEvent::UpdateStarted { kind: UpdateKind::Full, .. })));
+        assert!(events.iter().any(|e| matches!(e, UiEvent::UpdateStep(UpdateStep::Page(_)))), "{events:?}");
+        let Loaded::Updated(rep) = &full.how else { panic!() };
+        assert!(!rep.unchanged);
+        assert_eq!((rep.summary.new_posts, rep.summary.updated_posts, rep.summary.gone_posts), (0, 0, 0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn download_new_fetches_only_what_is_new_and_records_it_and_all_never_replaces() {
+        let r = run(small_posts()).await;
+        r.handle.send(Command::Scan { url: r.url.clone() });
+        let (_, first) = loaded(&r.rx);
+        let n = first.files.iter().filter(|f| !f.missing).count();
+        assert!(n >= 6);
+        // Sizing runs in the background after a first scan; let it finish so the file requests are countable.
+        until(&r.rx, |e| matches!(e, UiEvent::SizingFinished { .. }).then_some(()));
+        let out = TempDir::new().unwrap();
+        let go_new = |links| Command::DownloadNew {
+            selection: download_all(),
+            custom_extensions: String::new(),
+            output: out.path().to_path_buf(),
+            links,
+        };
+        r.handle.send(go_new(vec![]));
+        let (events, summary) = until(&r.rx, |e| match e {
+            UiEvent::DownloadFinished(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert!(events.iter().any(|e| matches!(e, UiEvent::DownloadStarted { jobs } if jobs.len() == n)));
+        assert_eq!((summary.done, summary.failed), (n, 0), "{summary:?}");
+        let (_, marks) = until(&r.rx, |e| match e {
+            UiEvent::FileMarks(m) => Some(m.clone()),
+            _ => None,
+        });
+        assert!(marks.iter().zip(&first.files).all(|(m, f)| m.downloaded == !f.missing));
+        assert!(r.f.lib.pending_files(&r.f.creator).unwrap().is_empty(), "the library recorded every file");
+
+        // A second "new only" has nothing to do.
+        let hits = r.f.file_requests().len();
+        r.handle.send(go_new(vec![]));
+        let (_, none) = until(&r.rx, |e| match e {
+            UiEvent::DownloadFinished(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(none.done, 0);
+        assert_eq!(r.f.file_requests().len(), hits);
+
+        // "Download all" skips what is in the folder: nothing is fetched, nothing is replaced.
+        let a_file = r.f.lib.posts(&r.f.creator).unwrap()[0].files[0].saved_path.clone().unwrap();
+        std::fs::write(&a_file, b"changed by the user").unwrap();
+        r.handle.send(Command::StartDownload {
+            selection: download_all(),
+            custom_extensions: String::new(),
+            output: out.path().to_path_buf(),
+            links: vec![],
+        });
+        let (_, all) = until(&r.rx, |e| match e {
+            UiEvent::DownloadFinished(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!((all.done, all.skipped), (0, n), "{all:?}");
+        assert_eq!(std::fs::read(&a_file).unwrap(), b"changed by the user", "a file that is there is never replaced");
+        assert_eq!(r.f.file_requests().len(), hits);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn a_failed_or_cancelled_update_leaves_the_library_file_byte_identical() {
+        let r = run(two_page_posts()).await;
+        r.handle.send(Command::Scan { url: r.url.clone() });
+        loaded(&r.rx);
+        until(&r.rx, |e| matches!(e, UiEvent::SizingFinished { .. }).then_some(()));
+        let bytes = || std::fs::read(r.f.lib.path()).unwrap();
+        let before = r.f.snapshot();
+        let file_before = bytes();
+        // The site starts failing on page 2.
+        r.f.world().set_updated("u2");
+        r.f.world().fail_page = Some((50, 500));
+        r.handle.send(Command::Scan { url: r.url.clone() });
+        let (_, (cause, saving)) = until(&r.rx, |e| match e {
+            UiEvent::UpdateFailed { cause, saving } => Some((cause.clone(), *saving)),
+            _ => None,
+        });
+        assert!(!cause.is_empty() && !saving);
+        assert_eq!(r.f.snapshot(), before);
+        assert_eq!(bytes(), file_before, "the SQLite file itself is unchanged");
+        // Cancelled by the user after the first page.
+        r.f.world().fail_page = None;
+        r.handle.send(Command::Scan { url: r.url.clone() });
+        until(&r.rx, |e| matches!(e, UiEvent::UpdateStep(UpdateStep::Page(_))).then_some(()));
+        r.handle.send(Command::Cancel);
+        until(&r.rx, |e| matches!(e, UiEvent::UpdateCancelled | UiEvent::ProfileLoaded(_)).then_some(()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn removing_a_profile_forgets_it_and_keeps_the_files() {
+        let r = run(small_posts()).await;
+        r.handle.send(Command::Scan { url: r.url.clone() });
+        loaded(&r.rx);
+        until(&r.rx, |e| matches!(e, UiEvent::SizingFinished { .. }).then_some(()));
+        let out = TempDir::new().unwrap();
+        r.handle.send(Command::DownloadNew {
+            selection: download_all(),
+            custom_extensions: String::new(),
+            output: out.path().to_path_buf(),
+            links: vec![],
+        });
+        until(&r.rx, |e| matches!(e, UiEvent::DownloadFinished(_)).then_some(()));
+        let files: Vec<PathBuf> =
+            r.f.lib
+                .posts(&r.f.creator)
+                .unwrap()
+                .iter()
+                .flat_map(|p| p.files.iter().filter_map(|x| x.saved_path.clone()))
+                .collect();
+        assert!(!files.is_empty());
+        r.handle.send(Command::OpenProfile(r.f.creator.clone()));
+        loaded(&r.rx);
+        r.handle.send(Command::RemoveProfile(r.f.creator.clone()));
+        until(&r.rx, |e| matches!(e, UiEvent::ProfileRemoved { .. }).then_some(()));
+        assert!(r.f.lib.profiles().unwrap().is_empty());
+        assert!(files.iter().all(|p| p.exists()));
+        // Added again it is a first scan, and downloading saves new copies beside the old ones.
+        r.handle.send(Command::Scan { url: r.url.clone() });
+        let (events, again) = loaded(&r.rx);
+        assert_eq!(again.how, Loaded::First);
+        assert!(events.iter().any(|e| matches!(e, UiEvent::ScanStarted(_))));
+        until(&r.rx, |e| matches!(e, UiEvent::SizingFinished { .. }).then_some(()));
+        r.handle.send(Command::DownloadNew {
+            selection: download_all(),
+            custom_extensions: String::new(),
+            output: out.path().to_path_buf(),
+            links: vec![],
+        });
+        until(&r.rx, |e| matches!(e, UiEvent::DownloadFinished(_)).then_some(()));
+        let copies =
+            r.f.lib
+                .posts(&r.f.creator)
+                .unwrap()
+                .iter()
+                .flat_map(|p| p.files.iter().filter_map(|x| x.saved_path.clone()))
+                .filter(|p| p.to_string_lossy().contains(" (2)"))
+                .count();
+        assert_eq!(copies, files.len(), "re-adding then downloading saves name (2) copies");
+        assert!(files.iter().all(|p| p.exists()), "and the first copies are untouched");
+    }
+
+    /// Files Pawchive has no copy of are never fetched in full; their thumbnails still go with
+    /// "Download all" when the user ticks Preview only, are left out of "Download new only", and are
+    /// not recorded in the library either way.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn thumbnails_of_missing_images_follow_download_all_and_not_new_only() {
+        let r = run_for(fanbox("1386751"), no_edited_posts()).await;
+        r.handle.send(Command::Scan { url: r.url.clone() });
+        let (_, first) = loaded(&r.rx);
+        let images = first.files.iter().filter(|f| f.name.ends_with(".jpg") || f.name.ends_with(".png")).count();
+        assert!(images > 0 && first.files.iter().all(|f| f.missing), "{images} images, all gone from Pawchive");
+        let out = TempDir::new().unwrap();
+        let sel = |preview| Selection { categories: Category::ALL.into_iter().collect(), include_preview: preview };
+        // New only: nothing in full size, no thumbnails: nothing to do.
+        r.handle.send(Command::DownloadNew {
+            selection: sel(true),
+            custom_extensions: String::new(),
+            output: out.path().to_path_buf(),
+            links: vec![],
+        });
+        let (events, _) = until(&r.rx, |e| matches!(e, UiEvent::DownloadFinished(_)).then_some(()));
+        assert!(!events.iter().any(|e| matches!(e, UiEvent::DownloadStarted { .. })), "{events:?}");
+        // Download all with Preview only: thumbnail jobs for the images, nothing recorded.
+        r.handle.send(Command::StartDownload {
+            selection: sel(true),
+            custom_extensions: String::new(),
+            output: out.path().to_path_buf(),
+            links: vec![],
+        });
+        let (events, _) = until(&r.rx, |e| matches!(e, UiEvent::DownloadFinished(_)).then_some(()));
+        let jobs = events
+            .iter()
+            .find_map(|e| match e {
+                UiEvent::DownloadStarted { jobs } => Some(jobs.clone()),
+                _ => None,
+            })
+            .expect("a download started");
+        assert_eq!(jobs.len(), images);
+        assert!(jobs.iter().all(|j| j.label.contains(".thumb.")), "{jobs:?}");
+        assert!(r.f.lib.posts(&r.f.creator).unwrap().iter().flat_map(|p| &p.files).all(|f| !f.downloaded));
+    }
 }

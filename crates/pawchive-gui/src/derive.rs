@@ -122,7 +122,19 @@ pub fn download_block(has_folder: bool, selected: usize, all_gone: bool) -> Opti
 pub fn window_title(m: &Model, now: Instant) -> String {
     const NAME: &str = "Pawchive Downloader";
     match m.phase {
-        Phase::Scanning => format!("Scanning… page {} — {NAME}", m.scan_progress.pages.max(1)),
+        Phase::Scanning => match &m.update {
+            Some(u) => match u.step {
+                pawchive_core::session::UpdateStep::Checking => format!("Checking… — {NAME}"),
+                _ => {
+                    let page = m.scan_progress.pages.max(1);
+                    match pawchive_core::session::est_pages(u.saved_posts) {
+                        0 => format!("Updating… page {page} — {NAME}"),
+                        n => format!("Updating… page {page} of about {n} — {NAME}"),
+                    }
+                }
+            },
+            None => format!("Scanning… page {} — {NAME}", m.scan_progress.pages.max(1)),
+        },
         Phase::Downloading => match m.slow_secs(now) {
             Some(s) => format!("Waiting {s} s — {NAME}"),
             None => format!("{:.0}% — {NAME}", m.fraction() * 100.0),

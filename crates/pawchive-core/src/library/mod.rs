@@ -11,11 +11,13 @@ mod download;
 mod fingerprint;
 mod scan;
 mod store;
+mod view;
 
-pub use download::{DownloadSummary, PendingFile};
+pub use download::{DownloadPlan, DownloadSummary, DownloadTarget, PendingFile};
 pub use fingerprint::fingerprint;
-pub use scan::{PostChange, PostState, ScanMode, ScanOutcome, FULL_READ_MAX_AGE_SECS};
-pub use store::{FileRecord, Library, LinkRecord, PostRecord, ProfileRecord};
+pub use scan::{PostChange, PostState, ScanMode, ScanOutcome, ScanStep, FULL_READ_MAX_AGE_SECS};
+pub use store::{ChangeSummary, FileRecord, Library, LinkRecord, PostLabel, PostRecord, ProfileRecord};
+pub use view::{LoadedProfile, PostRow, SavedFile};
 
 /// File name of the database inside the data directory.
 pub const DB_FILE: &str = "library.sqlite3";

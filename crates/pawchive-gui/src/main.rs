@@ -5,6 +5,8 @@ mod app;
 mod derive;
 mod dev;
 mod format;
+mod library_state;
+mod library_view;
 mod links_state;
 mod links_view;
 mod modals;
@@ -38,6 +40,22 @@ fn window_icon() -> Option<egui::IconData> {
     eframe::icon_data::from_png_bytes(ICON_PNG).ok()
 }
 
+/// The saved library, or why it could not be opened. A library that cannot be opened is never
+/// deleted, truncated or recreated: the app just works without it (ui-spec-library §2.6).
+fn open_library() -> Result<pawchive_core::library::Library, String> {
+    let dir =
+        pawchive_core::library::Library::default_data_dir().ok_or("There is no home folder to keep a library in.")?;
+    pawchive_core::library::Library::open(&dir).map_err(|e| {
+        let why = e.to_string();
+        let why = if why.contains("locked") || why.contains("busy") {
+            "the database is locked (another copy of Pawchive Downloader may be running)".to_string()
+        } else {
+            why.trim_start_matches("library database: ").to_string()
+        };
+        format!("Couldn't open {}: {why}.", pawchive_core::library::DB_FILE)
+    })
+}
+
 fn main() -> eframe::Result {
     let settings = Settings::load();
     let mut hosts = Hosts::default();
@@ -59,7 +77,8 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
             let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || ctx.request_repaint());
-            let (handle, rx) = session::spawn(settings.clone(), hosts, Tuning::default(), notify);
+            let (handle, rx) =
+                session::spawn_with_library(settings.clone(), hosts, Tuning::default(), notify, Some(open_library()));
             Ok(Box::new(app::App::new(cc, settings, handle, rx)))
         }),
     )

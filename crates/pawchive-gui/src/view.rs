@@ -105,9 +105,20 @@ impl App {
     }
 
     fn step_profile(&mut self, ui: &mut Ui, p: &Pal, acts: &mut Vec<Action>) {
-        heading(ui, p, "1", "Profile link");
+        // The heading row reserves a slot for `‹ Saved profiles`; the link itself is created after
+        // Full rescan so the Tab order is URL, button, Full rescan, back link (ui-spec-library §3).
+        let back_slot = ui
+            .horizontal(|ui| {
+                heading(ui, p, "1", "Profile link");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.allocate_exact_size(vec2(130.0, 22.0), Sense::hover()).0
+                })
+                .inner
+            })
+            .inner;
         let editable = self.url_editable();
         let scanning = self.model.phase == Phase::Scanning;
+        let updating_link = self.updating_link();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = S2;
             let w = ui.available_width() - 76.0 - S2;
@@ -133,14 +144,22 @@ impl App {
                 if secondary(ui, "Cancel", 76.0, true).clicked() {
                     acts.push(Action::CancelScan);
                 }
-            } else if ui
-                .add_enabled(
+            } else {
+                let label = if updating_link { "Update" } else { "Scan" };
+                let b = ui.add_enabled(
                     editable && !self.url.trim().is_empty(),
-                    Button::new(RichText::new("Scan").strong()).min_size(vec2(76.0, 32.0)),
-                )
-                .clicked()
-            {
-                acts.push(Action::Scan);
+                    Button::new(RichText::new(label).strong()).min_size(vec2(76.0, 32.0)),
+                );
+                let b = if updating_link {
+                    b.on_hover_text(
+                        "Checks whether the profile changed (1 request). If it did, reads the whole post list. Ctrl+U",
+                    )
+                } else {
+                    b
+                };
+                if b.clicked() {
+                    acts.push(Action::Scan);
+                }
             }
         });
         if let Some(e) = &self.url_error {
@@ -148,6 +167,8 @@ impl App {
                 ui.label(RichText::new("⚠").color(p.bad));
                 ui.label(RichText::new(e).color(p.bad).size(T_SMALL));
             });
+        } else if self.saved_hint(ui, p, acts) {
+            // the library's lines: the open profile with Full rescan, or "already in your library"
         } else if let (Some(c), false) = (&self.model.creator, self.model.phase == Phase::Empty) {
             let head = format!("{} · user {}", c.service.as_str(), c.id);
             let post_id = self.model.scan_target.as_ref().and_then(|t| t.post_id.clone());
@@ -175,13 +196,28 @@ impl App {
         } else {
             ui.label(dim(p, "Paste a link, then press Scan (Enter)."));
         }
+        if self.model.library_on() && self.model.saved.is_some() && self.model.phase != Phase::Empty {
+            let can = !self.model.phase.busy();
+            // `new_child`, not `put`: `put` would move the parent's cursor back up to the slot, and
+            // step 2 would be drawn over step 1.
+            let mut slot =
+                ui.new_child(egui::UiBuilder::new().max_rect(back_slot).layout(Layout::right_to_left(Align::Center)));
+            let r =
+                crate::library_view::back_link(&mut slot, p, can, "Wait for the current run to finish, or cancel it.");
+            if r.clicked() {
+                acts.push(Action::BackToList);
+            }
+        }
     }
 
     fn step_types(&mut self, ui: &mut Ui, p: &Pal, acts: &mut Vec<Action>) {
         heading(ui, p, "2", "What to download");
         let phase = self.model.phase;
-        let live = phase == Phase::Scanning;
+        // An update keeps the saved counts on screen; only a first scan has nothing to show yet.
+        let updating = self.model.update.is_some();
+        let live = phase == Phase::Scanning && !updating;
         if !live
+            && !updating
             && !matches!(phase, Phase::Ready | Phase::Cancelled | Phase::Finished | Phase::Paused | Phase::Downloading)
         {
             ui.label(dim(p, "File types appear here after the scan."));
@@ -332,13 +368,28 @@ impl App {
 
     pub(crate) fn centre(&mut self, ui: &mut Ui, p: &Pal, acts: &mut Vec<Action>) {
         if self.model.phase == Phase::Empty {
-            empty_state(ui, p);
+            if self.model.profiles().is_empty() {
+                self.library_unavailable_card(ui, p);
+                let first_run = self.model.library_on();
+                empty_state(
+                    ui,
+                    p,
+                    first_run,
+                    if matches!(self.model.lib, crate::state::Lib::Unavailable(_)) { S4 } else { 64.0 },
+                );
+                if first_run {
+                    ui.vertical_centered(|ui| self.first_run_card(ui, p));
+                }
+            } else {
+                self.saved_list(ui, p, acts);
+            }
             return;
         }
         let now = Instant::now();
         self.status_card(ui, p, now);
         ui.add_space(S3);
-        if matches!(self.model.phase, Phase::Scanning | Phase::ScanError) {
+        let updating = self.model.update.is_some();
+        if matches!(self.model.phase, Phase::Scanning | Phase::ScanError) && !updating {
             ui.add_space(S5);
             let msg = if self.model.phase == Phase::Scanning {
                 "The file list appears when the scan finishes."
@@ -350,21 +401,32 @@ impl App {
         }
         self.tabs(ui, p);
         ui.add_space(S1);
+        if self.tab == Tab::Files && self.run_rows_shown() {
+            self.filter_row(ui);
+            ui.add_space(S1);
+        }
         match self.tab {
             Tab::Files => self.files_table(ui, p, now),
             Tab::Links => self.links_tab(ui, p, acts),
+            Tab::Posts => self.posts_tab(ui, p),
             Tab::Problems => self.problems(ui, p, acts),
             Tab::Log => self.log_view(ui, p, acts),
         }
     }
 
+    /// The Files table shows the run's rows (not the "what will be saved" preview).
+    fn run_rows_shown(&self) -> bool {
+        !matches!(self.model.phase, Phase::Ready) && self.model.update.is_none()
+    }
+
     fn tabs(&mut self, ui: &mut Ui, p: &Pal) {
-        let running = !matches!(self.model.phase, Phase::Ready);
+        let running = self.run_rows_shown();
         let files = if running { self.model.pawchive_rows().count() } else { self.ready_rows().len() };
         let n_links = self.model.links.len();
         let failed = self.model.failed();
         let problems = self.model.problem_count();
-        let narrow = ui.available_width() < 640.0;
+        // The Posts tab exists once a creator scan has finished and the library saved it.
+        let posts = self.model.saved.as_ref().map(|s| s.posts.len());
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = S1;
             ui.selectable_value(&mut self.tab, Tab::Files, format!("Files {}", comma(files)));
@@ -372,6 +434,11 @@ impl App {
             let links_label =
                 if n_links > 0 { format!("External links {}", comma(n_links)) } else { "External links".into() };
             ui.selectable_value(&mut self.tab, Tab::Links, links_label);
+            if let Some(n) = posts {
+                ui.selectable_value(&mut self.tab, Tab::Posts, format!("Posts {}", comma(n)));
+            } else if self.tab == Tab::Posts {
+                self.tab = Tab::Files;
+            }
             let mut label =
                 RichText::new(if problems > 0 { format!("Problems {problems}") } else { "Problems".to_string() });
             if failed > 0 {
@@ -381,48 +448,54 @@ impl App {
             }
             ui.selectable_value(&mut self.tab, Tab::Problems, label);
             ui.selectable_value(&mut self.tab, Tab::Log, "Log");
-            if self.tab != Tab::Files || !running {
-                return;
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = S1;
-                let rows = &self.model.rows;
-                let count = |f: Filter| rows.iter().filter(|r| r.is_pawchive() && filter_match(f, &r.state)).count();
-                let all = [
-                    (Filter::All, "All"),
-                    (Filter::Active, "Active"),
-                    (Filter::Queued, "Queued"),
-                    (Filter::Done, "Done"),
-                    (Filter::Failed, "Failed"),
-                ];
-                if narrow {
-                    // Under 640 pt of centre width the chips collapse into one dropdown.
-                    let cur = all
-                        .iter()
-                        .find(|(f, _)| *f == self.filter)
-                        .map(|(f, l)| format!("{l} {}", count(*f)))
-                        .unwrap_or_default();
-                    egui::ComboBox::from_id_salt("filter").selected_text(format!("Show: {cur}")).show_ui(ui, |ui| {
-                        for (f, l) in all {
-                            ui.selectable_value(&mut self.filter, f, format!("{l} {}", count(f)));
-                        }
-                    });
-                } else {
-                    for (f, l) in all.iter().rev() {
-                        let n = count(*f);
-                        if *f != Filter::All && n == 0 && *f != self.filter {
-                            continue; // zero-count chips stay hidden unless selected
-                        }
-                        ui.selectable_value(&mut self.filter, *f, RichText::new(format!("{l} {n}")).size(T_SMALL));
+        });
+    }
+
+    /// The Files chips (`All · Active · Queued · Done · Failed`) in a 28 pt row under the tab strip: with five
+    /// tabs they no longer fit beside it. Below 640 pt they collapse into one dropdown (ui-spec-library §1.6).
+    fn filter_row(&mut self, ui: &mut Ui) {
+        let narrow = ui.available_width() < 640.0;
+        ui.horizontal(|ui| {
+            ui.set_min_height(28.0);
+            ui.spacing_mut().item_spacing.x = S1;
+            let rows = &self.model.rows;
+            let count = |f: Filter| rows.iter().filter(|r| r.is_pawchive() && filter_match(f, &r.state)).count();
+            let all = [
+                (Filter::All, "All"),
+                (Filter::Active, "Active"),
+                (Filter::Queued, "Queued"),
+                (Filter::Done, "Done"),
+                (Filter::Failed, "Failed"),
+            ];
+            if narrow {
+                let cur = all
+                    .iter()
+                    .find(|(f, _)| *f == self.filter)
+                    .map(|(f, l)| format!("{l} {}", count(*f)))
+                    .unwrap_or_default();
+                egui::ComboBox::from_id_salt("filter").selected_text(format!("Show: {cur}")).show_ui(ui, |ui| {
+                    for (f, l) in all {
+                        ui.selectable_value(&mut self.filter, f, format!("{l} {}", count(f)));
                     }
+                });
+            } else {
+                for (f, l) in all {
+                    let n = count(f);
+                    if f != Filter::All && n == 0 && f != self.filter {
+                        continue; // zero-count chips stay hidden unless selected
+                    }
+                    ui.selectable_value(&mut self.filter, f, RichText::new(format!("{l} {n}")).size(T_SMALL));
                 }
-            });
+            }
         });
     }
 
     // ---- status card -------------------------------------------------------------------------
 
     fn status_card(&mut self, ui: &mut Ui, p: &Pal, now: Instant) {
+        if self.library_card(ui, p, now) {
+            return;
+        }
         let m = &self.model;
         let total = m.rows.len();
         let saved = m.saved();
@@ -481,6 +554,7 @@ impl App {
                     None => format!("Scan complete — {} posts, {}", comma(m.posts), files_word(all)),
                 };
                 let one_post = m.scan_post.is_some();
+                let first_saved = m.saved.is_some();
                 let mut line = format!("{} selected · {}", files_word(sel.files), size_label(sel.bytes, sel.partial));
                 if sel.thumbnails {
                     line.push_str(" + thumbnails (size not measured)");
@@ -560,7 +634,15 @@ impl App {
                                     .wrap(),
                                 );
                             }
-                            if gone == 0 && n_links == 0 {
+                            if first_saved {
+                                ui.add(
+                                    egui::Label::new(dim(
+                                        p,
+                                        "Saved to your library. Next time, open it from Saved profiles and press Update.",
+                                    ))
+                                    .truncate(),
+                                );
+                            } else if gone == 0 && n_links == 0 {
                                 ui.label(dim(
                                     p,
                                     "Everything listed below will be saved. Untick types on the left to leave them out.",
@@ -680,7 +762,7 @@ impl App {
     // ---- files table -----------------------------------------------------------------------------
 
     fn files_table(&mut self, ui: &mut Ui, p: &Pal, now: Instant) {
-        if self.model.phase == Phase::Ready {
+        if self.model.phase == Phase::Ready || self.model.update.is_some() {
             let rows = self.ready_rows();
             table(ui, p, true, rows.len(), |ui, cols, r, zebra| ready_row(ui, p, cols, &rows[r], zebra));
             return;
@@ -902,6 +984,8 @@ impl App {
         let remaining = self.model.remaining();
         let folder_exists =
             self.run_folder().is_some_and(|f| f.exists()) || (self.has_folder() && matches!(phase, Phase::Finished));
+        let two_buttons = phase == Phase::Ready && self.model.saved.as_ref().is_some_and(|s| s.has_history());
+        let new_only = if two_buttons { self.new_only() } else { Default::default() };
         let m = &self.model;
         ui.horizontal(|ui| {
             ui.set_min_height(BTN_H);
@@ -909,15 +993,32 @@ impl App {
             ui.allocate_ui_with_layout(vec2(left_w, BTN_H), Layout::left_to_right(Align::Center), |ui| {
                 let t: RichText = match phase {
                     Phase::Empty => dim(p, "Paste a profile link to begin."),
+                    Phase::Scanning if m.update.is_some() => {
+                        dim(p, "Updating. Download unlocks when it finishes.").size(T_BODY)
+                    }
                     Phase::Scanning => dim(p, "Scanning. Download unlocks when it finishes."),
                     Phase::ScanError => dim(p, "Nothing was saved. Scan again starts over."),
                     Phase::Ready | Phase::Cancelled if m.awaiting_checks => {
                         dim(p, awaiting_text(m, Instant::now())).size(T_BODY)
                     }
+                    Phase::Ready if two_buttons => match (block, new_only.files) {
+                        (Some(e), _) => dim(p, e).size(T_BODY),
+                        (None, 0) => dim(p, "Nothing new to download.").size(T_BODY),
+                        (None, n) => RichText::new(format!(
+                            "{} · {}",
+                            if n == 1 { "1 new file".to_string() } else { format!("{} new files", comma(n)) },
+                            size_label(new_only.bytes, new_only.partial)
+                        ))
+                        .monospace(),
+                    },
                     Phase::Ready => match block {
                         Some(e) => dim(p, e).size(T_BODY),
                         None => {
-                            let mut s = format!("{} · {}", files_word(sel.files), size_label(sel.bytes, sel.partial));
+                            let mut s = format!(
+                                "{} · {}",
+                                files_word(sel.files),
+                                self.size_text(sel.bytes, sel.unsized_files, sel.partial)
+                            );
                             if sel.thumbnails {
                                 s.push_str(" + thumbnails");
                             }
@@ -956,6 +1057,43 @@ impl App {
                     Phase::Ready | Phase::Cancelled if m.awaiting_checks => {
                         if secondary(ui, "Cancel", 92.0, true).clicked() {
                             acts.push(Action::Cancel);
+                        }
+                    }
+                    Phase::Ready if two_buttons => {
+                        // The primary is always bottom-right: "Download new only" once there is history.
+                        let n = new_only.files;
+                        let enabled = block.is_none() && n > 0;
+                        let r = primary(ui, p, &format!("Download new only ({})", comma(n)), 224.0, enabled);
+                        match (block, n) {
+                            (Some(e), _) => {
+                                r.on_disabled_hover_text(e);
+                            }
+                            (None, 0) => {
+                                r.on_disabled_hover_text("Nothing new to download.");
+                            }
+                            (None, _) => {
+                                if r.on_hover_text(
+                                    "Saves only files you haven't downloaded before, even if you've moved or deleted older ones. Ctrl+Enter",
+                                )
+                                .clicked()
+                                {
+                                    acts.push(Action::DownloadNew);
+                                }
+                            }
+                        }
+                        let all = secondary(ui, &format!("Download all ({})", comma(sel.files)), 150.0, block.is_none());
+                        match block {
+                            Some(e) => {
+                                all.on_disabled_hover_text(e);
+                            }
+                            None => {
+                                if all
+                                    .on_hover_text("Saves every selected file again, skipping files already in the folder. Use this to fill gaps.")
+                                    .clicked()
+                                {
+                                    acts.push(Action::Download);
+                                }
+                            }
                         }
                     }
                     Phase::Ready => {
@@ -1045,14 +1183,14 @@ fn size_cell(ui: &mut Ui, p: &Pal, live: bool, has: bool, bytes: u64, partial: b
     }
 }
 
-enum Lead {
+pub(crate) enum Lead {
     Spinner,
     Glyph(&'static str, Color32),
     Icon(Glyph, Color32),
 }
 
 /// Headline row of a status card: spinner or glyph, 16 pt strong title, counter on the right.
-fn card_head(ui: &mut Ui, p: &Pal, lead: Lead, title: &str, right: Option<String>) {
+pub(crate) fn card_head(ui: &mut Ui, p: &Pal, lead: Lead, title: &str, right: Option<String>) {
     ui.horizontal(|ui| {
         match lead {
             Lead::Spinner => {
@@ -1077,8 +1215,8 @@ fn card_head(ui: &mut Ui, p: &Pal, lead: Lead, title: &str, right: Option<String
     });
 }
 
-fn empty_state(ui: &mut Ui, p: &Pal) {
-    ui.add_space(64.0);
+fn empty_state(ui: &mut Ui, p: &Pal, _first_run: bool, top: f32) {
+    ui.add_space(top);
     ui.vertical_centered(|ui| {
         ui.label(RichText::new("Download a creator's files from Pawchive").size(T_TITLE).strong());
         ui.add_space(S2);
@@ -1187,7 +1325,7 @@ fn table(ui: &mut Ui, p: &Pal, ready: bool, count: usize, mut row: impl FnMut(&m
 /// A status icon. Pause and retry are drawn with the painter: the bundled fonts have no glyph for
 /// them (they showed as `▯`), and a drawn shape cannot go missing on someone else's machine.
 #[derive(Clone, Copy)]
-enum Glyph {
+pub(crate) enum Glyph {
     Text(&'static str),
     Pause,
     Retry,
@@ -1255,6 +1393,11 @@ fn ready_row(ui: &mut Ui, p: &Pal, cols: &Cols, r: &ReadyRow, _zebra: bool) {
     cols.put(ui, 3, false, |ui| {
         if r.missing {
             ui.label(RichText::new("Not on Pawchive").size(T_SMALL).color(p.warn));
+        } else if r.downloaded {
+            let l = ui.label(dim(p, "✓ Downloaded"));
+            if let Some(path) = &r.saved_path {
+                l.on_hover_text(format!("Saved to {}", path.display()));
+            }
         } else {
             ui.label(dim(p, "Ready"));
         }
