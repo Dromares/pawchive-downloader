@@ -12,6 +12,7 @@ use eframe::egui::{
 };
 use pawchive_core::classify::{Category, CustomExts};
 use pawchive_core::names::{creator_dir, post_dir};
+use pawchive_core::plan::JobOrigin;
 
 use crate::app::{Action, App, Filter, ReadyRow, Tab};
 use crate::derive::{self, TYPE_ROWS};
@@ -49,7 +50,7 @@ fn filter_match(f: Filter, s: &RowState) -> bool {
 }
 
 /// `≥ 200.3 MB` while some sizes are still unknown, else the plain size.
-fn size_label(bytes: u64, partial: bool) -> String {
+pub(crate) fn size_label(bytes: u64, partial: bool) -> String {
     if partial {
         format!("≥ {}", human_size(bytes))
     } else {
@@ -148,12 +149,28 @@ impl App {
             });
         } else if let (Some(c), false) = (&self.model.creator, self.model.phase == Phase::Empty) {
             let head = format!("{} · user {}", c.service.as_str(), c.id);
-            let line = match self.model.phase {
-                Phase::Scanning => format!("{head} · scanning…"),
-                Phase::ScanError => format!("{head} · scan incomplete"),
-                _ => format!("{head} · {} posts", comma(self.model.posts)),
+            let post_id = self.model.scan_target.as_ref().and_then(|t| t.post_id.clone());
+            let line = match (&post_id, self.model.phase) {
+                (Some(id), Phase::Scanning) => format!("{head} · post {id} · reading…"),
+                (Some(id), Phase::ScanError) => format!("{head} · post {id} · scan incomplete"),
+                (Some(id), _) => format!("{head} · post {id}"),
+                (None, Phase::Scanning) => format!("{head} · scanning…"),
+                (None, Phase::ScanError) => format!("{head} · scan incomplete"),
+                (None, _) => format!("{head} · {} posts", comma(self.model.posts)),
             };
             ui.label(dim(p, line));
+            if let Some(id) = post_id {
+                // The link is the user's statement of scope: say back what was understood.
+                ui.add(
+                    egui::Label::new(dim(
+                        p,
+                        format!(
+                            "Only this post is scanned. Remove \u{201c}/post/{id}\u{201d} from the link to scan the whole creator."
+                        ),
+                    ))
+                    .wrap(),
+                );
+            }
         } else {
             ui.label(dim(p, "Paste a link, then press Scan (Enter)."));
         }
@@ -258,6 +275,7 @@ impl App {
                 .wrap(),
             );
         });
+        self.left_links_row(ui, p, editable, live);
         ui.add_space(S2);
         ui.spacing_mut().item_spacing.y = S2;
         ui.label(dim(p, "Also include these extensions"));
@@ -333,6 +351,7 @@ impl App {
         ui.add_space(S1);
         match self.tab {
             Tab::Files => self.files_table(ui, p, now),
+            Tab::Links => self.links_tab(ui, p, acts),
             Tab::Problems => self.problems(ui, p, acts),
             Tab::Log => self.log_view(ui, p, acts),
         }
@@ -340,13 +359,18 @@ impl App {
 
     fn tabs(&mut self, ui: &mut Ui, p: &Pal) {
         let running = !matches!(self.model.phase, Phase::Ready);
-        let files = if running { self.model.rows.len() } else { self.ready_rows().len() };
+        let files = if running { self.model.pawchive_rows().count() } else { self.ready_rows().len() };
+        let n_links = self.model.links.len();
         let failed = self.model.failed();
         let problems = self.model.problem_count();
         let narrow = ui.available_width() < 640.0;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = S1;
             ui.selectable_value(&mut self.tab, Tab::Files, format!("Files {}", comma(files)));
+            // Always present once a scan has finished (the other tabs never shift); the app never switches to it by itself.
+            let links_label =
+                if n_links > 0 { format!("External links {}", comma(n_links)) } else { "External links".into() };
+            ui.selectable_value(&mut self.tab, Tab::Links, links_label);
             let mut label =
                 RichText::new(if problems > 0 { format!("Problems {problems}") } else { "Problems".to_string() });
             if failed > 0 {
@@ -362,7 +386,7 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = S1;
                 let rows = &self.model.rows;
-                let count = |f: Filter| rows.iter().filter(|r| filter_match(f, &r.state)).count();
+                let count = |f: Filter| rows.iter().filter(|r| r.is_pawchive() && filter_match(f, &r.state)).count();
                 let all = [
                     (Filter::All, "All"),
                     (Filter::Active, "Active"),
@@ -406,9 +430,15 @@ impl App {
             Phase::Scanning => {
                 let sp = m.scan_progress;
                 let t = ui.input(|i| i.time) as f32 * 0.6 % 2.0;
+                let one_post = m.scan_target.as_ref().is_some_and(|t| t.post_id.is_some());
                 card(ui, p, p.accent, |ui| {
-                    card_head(ui, p, Lead::Spinner, "Scanning profile…", Some(clock(m.scan_elapsed(now))));
+                    let head = if one_post { "Reading the post…" } else { "Scanning profile…" };
+                    card_head(ui, p, Lead::Spinner, head, Some(clock(m.scan_elapsed(now))));
                     indeterminate(ui, p, if t > 1.0 { 2.0 - t } else { t });
+                    if one_post {
+                        ui.label(dim(p, "One request to Pawchive: only this post is scanned."));
+                        return;
+                    }
                     ui.horizontal(|ui| {
                         ui.label(num(format!("page {}", sp.pages.max(1))));
                         ui.label(dim(p, "·"));
@@ -442,12 +472,16 @@ impl App {
                 let summary = self.summary();
                 let m = &self.model;
                 let all = m.files.len();
-                let title = if all == 0 {
-                    "Scan complete — no files found".to_string()
-                } else {
-                    format!("Scan complete — {} posts, {} files", comma(m.posts), comma(all))
+                let n_links = m.links.len();
+                let link_sel = crate::links_state::totals(&m.links).selected;
+                let files_word = |n: usize| if n == 1 { "1 file".to_string() } else { format!("{} files", comma(n)) };
+                let title = match &m.scan_post {
+                    Some(post) => format!("Scan complete — post \u{201c}{}\u{201d}, {}", post.title, files_word(all)),
+                    None if all == 0 => "Scan complete — no files found".to_string(),
+                    None => format!("Scan complete — {} posts, {} files", comma(m.posts), comma(all)),
                 };
-                let mut line = format!("{} files selected · {}", comma(sel.files), size_label(sel.bytes, sel.partial));
+                let one_post = m.scan_post.is_some();
+                let mut line = format!("{} selected · {}", files_word(sel.files), size_label(sel.bytes, sel.partial));
                 if sel.thumbnails {
                     line.push_str(" + thumbnails (size not measured)");
                 }
@@ -461,8 +495,12 @@ impl App {
                 let stripe = if gone > 0 { p.warn } else { p.ok };
                 card(ui, p, stripe, |ui| {
                     card_head(ui, p, Lead::Glyph(if gone > 0 { "⚠" } else { "✓" }, stripe), &title, None);
-                    if all == 0 {
-                        ui.label("This profile has no downloadable files, or the id doesn't exist.");
+                    if all == 0 && n_links == 0 {
+                        ui.label(if one_post {
+                            "No files or links found in this post."
+                        } else {
+                            "This profile has no downloadable files, or the id doesn't exist."
+                        });
                     } else {
                         ui.label(line);
                         // A 404 on the size probe is as permanent as a 404 on download.
@@ -494,11 +532,40 @@ impl App {
                                     .wrap(),
                                 );
                             });
-                        } else if gone == 0 {
-                            ui.label(dim(
-                                p,
-                                "Everything listed below will be saved. Untick types on the left to leave them out.",
-                            ));
+                        } else {
+                            if n_links > 0 {
+                                let plural = |n: usize, w: &str| {
+                                    if n == 1 {
+                                        format!("1 {w}")
+                                    } else {
+                                        format!("{} {w}s", comma(n))
+                                    }
+                                };
+                                ui.add(
+                                    egui::Label::new(dim(
+                                        p,
+                                        if link_sel == 0 {
+                                            format!(
+                                                "{} found, none selected. Open the External links tab to choose.",
+                                                plural(n_links, "external link")
+                                            )
+                                        } else {
+                                            format!(
+                                                "Includes {} from external links. {} found in all.",
+                                                files_word(link_sel),
+                                                plural(n_links, "link")
+                                            )
+                                        },
+                                    ))
+                                    .wrap(),
+                                );
+                            }
+                            if gone == 0 && n_links == 0 {
+                                ui.label(dim(
+                                    p,
+                                    "Everything listed below will be saved. Untick types on the left to leave them out.",
+                                ));
+                            }
                         }
                     }
                 });
@@ -536,7 +603,11 @@ impl App {
                     card_head(ui, p, Lead::Spinner, "Downloading", Some(counter));
                     bar(ui, m.fraction(), p.accent);
                     ui.label(parts.join(" · "));
-                    ui.label(dim(p, format!("Elapsed {} · saving to {folder}", clock(m.elapsed(now)))));
+                    let incl = match m.link_file_rows() {
+                        0 => String::new(),
+                        k => format!("incl. {} from external links · ", comma(k)),
+                    };
+                    ui.label(dim(p, format!("{incl}Elapsed {} · saving to {folder}", clock(m.elapsed(now)))));
                 });
             }
             Phase::Paused => {
@@ -617,7 +688,8 @@ impl App {
         let slow = self.model.slow_until.is_some_and(|u| u > now);
         let phase = self.model.phase;
         let rows = &self.model.rows;
-        let mut idx: Vec<usize> = (0..rows.len()).filter(|&i| filter_match(self.filter, &rows[i].state)).collect();
+        let mut idx: Vec<usize> =
+            (0..rows.len()).filter(|&i| rows[i].is_pawchive() && filter_match(self.filter, &rows[i].state)).collect();
         // Live work first, then failures, stopped, queued; finished files sink (stable sort).
         idx.sort_by_key(|&i| match rows[i].state {
             RowState::Active | RowState::Retrying { .. } => 0,
@@ -745,7 +817,14 @@ impl App {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
                                 ui.add(egui::Label::new(RichText::new(&r.name).strong()).truncate());
-                                let why = format!("{} · {}", explain_failure(error), r.post);
+                                let why = match r.origin {
+                                    JobOrigin::Link { link, .. } => {
+                                        let host =
+                                            self.model.links.get(link).map(|l| l.link.host.name()).unwrap_or_default();
+                                        format!("{} · {host} · {}", explain_failure(error), post_label(&r.post))
+                                    }
+                                    JobOrigin::Pawchive => format!("{} · {}", explain_failure(error), r.post),
+                                };
                                 ui.add(egui::Label::new(RichText::new(why).color(p.ink_dim).size(T_SMALL)).truncate());
                             });
                         },
@@ -961,7 +1040,12 @@ fn card_head(ui: &mut Ui, p: &Pal, lead: Lead, title: &str, right: Option<String
             }
             Lead::Icon(g, c) => draw_icon(ui, &g, c, T_CARD),
         }
-        ui.label(RichText::new(title).size(T_CARD).strong());
+        if right.is_none() {
+            // A long post title truncates at the end; the tooltip carries all of it.
+            ui.add(egui::Label::new(RichText::new(title).size(T_CARD).strong()).truncate());
+        } else {
+            ui.label(RichText::new(title).size(T_CARD).strong());
+        }
         if let Some(r) = right {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(num(r).color(p.ink_dim));
@@ -1284,7 +1368,7 @@ mod tests {
     use std::time::Duration;
 
     fn retrying(attempt: u32, until: Instant) -> Row {
-        Row { post: "p".into(), name: "f".into(), state: RowState::Retrying { attempt, until }, done: 0, total: None }
+        Row { state: RowState::Retrying { attempt, until }, ..Row::new("p", "f", None) }
     }
 
     /// DAN-1543 D4: the card says "resuming in 49 s", so a row must not say "Retry 1/5 in 0 s".
@@ -1304,7 +1388,7 @@ mod tests {
     #[test]
     fn stopped_rows_use_the_drawn_pause_icon() {
         let p = Pal::new(crate::theme::Mode::Dark);
-        let r = Row { post: "p".into(), name: "f".into(), state: RowState::Stopped, done: 5, total: Some(10) };
+        let r = Row { state: RowState::Stopped, done: 5, ..Row::new("p", "f", Some(10)) };
         let look = row_look(&p, &r, Phase::Paused, false, Instant::now());
         assert_eq!(look.text, "Stopped at 50%");
         assert!(matches!(look.glyph, Glyph::Pause));

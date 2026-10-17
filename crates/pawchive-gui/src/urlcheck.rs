@@ -1,12 +1,12 @@
 //! Profile-link check with the exact inline messages from `ui-spec` section 8. The parsing itself
-//! is core's `parse_creator_url`; this only chooses which message to show.
+//! is core's `parse_scan_url`; this only chooses which message to show.
 
-use pawchive_core::creator::{parse_creator_url, CreatorRef};
+use pawchive_core::creator::{parse_scan_url, ScanTarget};
 use pawchive_core::model::Service;
 
 const NO_ID: &str = "That link has no creator id. Use https://pawchive.pw/{service}/user/{id}.";
 
-pub fn check(input: &str) -> Result<CreatorRef, String> {
+pub fn check(input: &str) -> Result<ScanTarget, String> {
     let t = input.trim();
     if t.is_empty() || t.chars().any(char::is_whitespace) || (!t.contains("://") && !t.contains('.')) {
         return Err("That doesn't look like a link. Paste a profile link from pawchive.pw.".into());
@@ -28,7 +28,7 @@ pub fn check(input: &str) -> Result<CreatorRef, String> {
         }
         Some(_) => {}
     }
-    parse_creator_url(t).map_err(|_| NO_ID.to_string())
+    parse_scan_url(t).map_err(|_| NO_ID.to_string())
 }
 
 #[cfg(test)]
@@ -43,9 +43,19 @@ mod tests {
             "https://pawchive.pw/fanbox/user/1386751?o=50",
             "https://www.pawchive.pw/Fanbox/user/1386751#top",
         ] {
-            let c = check(u).unwrap_or_else(|e| panic!("{u}: {e}"));
-            assert_eq!((c.service, c.id.as_str()), (Service::Fanbox, "1386751"), "{u}");
+            let t = check(u).unwrap_or_else(|e| panic!("{u}: {e}"));
+            assert_eq!(
+                (t.creator.service, t.creator.id.as_str(), t.post_id),
+                (Service::Fanbox, "1386751", None),
+                "{u}"
+            );
         }
+    }
+
+    #[test]
+    fn a_post_link_keeps_its_post_id() {
+        let t = check("https://pawchive.pw/patreon/user/5163822/post/162546844").unwrap();
+        assert_eq!((t.creator.id.as_str(), t.post_id.as_deref()), ("5163822", Some("162546844")));
     }
 
     #[test]
