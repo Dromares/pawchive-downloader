@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 
 use super::fingerprint::fingerprint;
-use super::store::{LinkRecord, PostWrite, ScanWrite};
+use super::store::{ChangeCounts, LinkRecord, PostWrite, ScanWrite};
 use super::Library;
 use crate::api::{Client, ScanProgress, PAGE_SIZE};
 use crate::control::Control;
@@ -37,6 +37,21 @@ pub enum ScanMode {
     /// Skip the gate: always walk the whole list and reconcile. The profile is still requested,
     /// once, so its `updated` time is saved for the next update scan.
     Full,
+}
+
+/// Where a scan is, for a front end that shows progress. Sent in this order: `Checking` (update
+/// scans only), `Reading`, then one `Page` per page, then `Missing` (`done` 0, then once more after
+/// each saved post the list did not hold). An update that finds the profile unchanged stops after `Checking`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanStep {
+    /// The one profile request that decides whether the list needs reading.
+    Checking,
+    /// The post list is being read (first scan, full rescan, or a changed or stale profile).
+    Reading,
+    /// A page of the list arrived.
+    Page(ScanProgress),
+    /// Saved posts the list did not hold are being asked for one by one.
+    Missing { done: usize, total: usize },
 }
 
 /// How a post differs from the saved library, for the GUI's New / Updated / Gone from site labels.
@@ -108,12 +123,15 @@ impl Library {
         creator: &CreatorRef,
         mode: ScanMode,
         control: &Control,
-        mut on_progress: impl FnMut(ScanProgress),
+        mut on_step: impl FnMut(ScanStep),
     ) -> Result<ScanOutcome> {
         let saved = self.saved(creator)?;
         let mut out = ScanOutcome::empty(mode);
 
         // Step 1: the profile. Requested in both modes; only the update scan may stop here.
+        if mode == ScanMode::Update {
+            on_step(ScanStep::Checking);
+        }
         let profile = client.fetch_profile(creator, control).await?;
         out.requests += 1;
         if mode == ScanMode::Update {
@@ -130,7 +148,8 @@ impl Library {
         }
 
         // Step 2: walk the whole list.
-        let walked = walk(client, creator, control, &mut on_progress, &mut out).await?;
+        on_step(ScanStep::Reading);
+        let walked = walk(client, creator, control, &mut on_step, &mut out).await?;
         let walked_ids: HashSet<&str> = walked.iter().map(|p| p.id.as_str()).collect();
 
         let mut writes = Vec::new();
@@ -138,20 +157,21 @@ impl Library {
         let mut news = Vec::new();
         for post in &walked {
             let fp = fingerprint(post);
+            // A post that came back after being marked gone counts as updated even if nothing else
+            // moved (DAN-1661, ui-spec-library section 6).
+            let restored = saved.posts.get(&post.id).is_some_and(|s| s.gone);
             let state = match saved.posts.get(&post.id) {
                 None => Some(PostState::New),
-                Some(s) if s.edited != post.edited || s.fingerprint != fp => Some(PostState::Updated),
+                Some(s) if restored || s.edited != post.edited || s.fingerprint != fp => Some(PostState::Updated),
                 Some(_) => None,
             };
-            // A post that came back after being marked gone is written even if nothing else moved.
-            let restored = saved.posts.get(&post.id).is_some_and(|s| s.gone);
             let change = state.map(|state| PostChange { post_id: post.id.clone(), title: post.title.clone(), state });
             match state {
                 Some(PostState::New) => out.new_posts += 1,
                 Some(_) => out.updated_posts += 1,
                 None => {}
             }
-            if state.is_none() && !restored {
+            if state.is_none() {
                 continue;
             }
             let files: Vec<_> = post
@@ -167,7 +187,13 @@ impl Library {
                 .filter(|(f, available)| *available && !saved.files.contains(&(post.id.clone(), f.path.clone())))
                 .count();
             let links = links::collect(std::slice::from_ref(post)).iter().map(LinkRecord::from).collect();
-            writes.push(PostWrite { post: post.clone(), fingerprint: fp, files, links });
+            writes.push(PostWrite {
+                post: post.clone(),
+                changed: state == Some(PostState::Updated),
+                fingerprint: fp,
+                files,
+                links,
+            });
             if let Some(c) = change {
                 if c.state == PostState::New {
                     news.push(c)
@@ -185,14 +211,19 @@ impl Library {
             .map(|(id, _)| id)
             .collect();
         missing.sort();
+        let total_missing = missing.len();
         let mut gone = Vec::new();
-        for id in missing {
+        if total_missing > 0 {
+            on_step(ScanStep::Missing { done: 0, total: total_missing });
+        }
+        for (done, id) in missing.into_iter().enumerate() {
             let found = client.fetch_post(creator, id, control).await?;
             out.requests += 1;
             match found {
                 None => gone.push(id.clone()),
                 Some(_) => out.hidden_live += 1,
             }
+            on_step(ScanStep::Missing { done: done + 1, total: total_missing });
         }
         out.gone_posts = gone.len();
 
@@ -204,6 +235,13 @@ impl Library {
             state: PostState::Gone,
         }));
         out.changes = changes;
+        let found_change = out.new_posts + out.updated_posts + out.gone_posts > 0;
+        let change = (saved.profile.is_some() && found_change).then_some(ChangeCounts {
+            new_posts: out.new_posts,
+            updated_posts: out.updated_posts,
+            new_files: out.new_files,
+            gone_posts: out.gone_posts,
+        });
         self.commit_scan(ScanWrite {
             creator,
             name: profile.name.as_deref(),
@@ -211,6 +249,7 @@ impl Library {
             full_read: true,
             posts: writes,
             gone,
+            change,
         })?;
         Ok(out)
     }
@@ -221,7 +260,7 @@ async fn walk(
     client: &Client,
     creator: &CreatorRef,
     control: &Control,
-    on_progress: &mut impl FnMut(ScanProgress),
+    on_step: &mut impl FnMut(ScanStep),
     out: &mut ScanOutcome,
 ) -> Result<Vec<Post>> {
     let mut posts: Vec<Post> = Vec::new();
@@ -252,7 +291,7 @@ async fn walk(
             }
         }
         progress.posts = posts.len();
-        on_progress(progress);
+        on_step(ScanStep::Page(progress));
     }
     Err(Error::Parse(format!("gave up after {MAX_PAGES} pages")))
 }

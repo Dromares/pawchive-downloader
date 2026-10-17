@@ -16,7 +16,7 @@ use pawchive_core::creator::CreatorRef;
 use pawchive_core::engine::{Engine, EngineConfig, Event};
 use pawchive_core::gate::Gate;
 use pawchive_core::http::{Http, RetryPolicy};
-use pawchive_core::library::{Library, PostState, ScanMode, ScanOutcome, FULL_READ_MAX_AGE_SECS};
+use pawchive_core::library::{Library, PostLabel, PostState, ScanMode, ScanOutcome, ScanStep, FULL_READ_MAX_AGE_SECS};
 use pawchive_core::model::Service;
 use pawchive_core::settings::Settings;
 use serde_json::{json, Value};
@@ -361,7 +361,11 @@ async fn a_post_that_answers_404_is_gone_and_one_that_comes_back_is_restored() {
     f.world().set_posts(small_posts());
     f.world().set_updated("u4");
     let back = f.scan(ScanMode::Update).await;
-    assert_eq!((back.gone_posts, back.new_posts, back.updated_posts), (0, 0, 0));
+    // A post that comes back counts as updated (ui-spec-library section 6, DAN-1661): it was
+    // `(0, 0, 0)` in the first version of this test.
+    assert_eq!((back.gone_posts, back.new_posts, back.updated_posts), (0, 0, 1));
+    assert_eq!(back.changes.len(), 1);
+    assert_eq!(back.changes[0].state, PostState::Updated);
     let p = f.lib.posts(&f.creator).unwrap().into_iter().find(|p| p.post_id == victim).unwrap();
     assert_eq!(p.removed_at, None);
 }
@@ -644,8 +648,8 @@ async fn a_scan_interrupted_mid_way_leaves_every_saved_row_as_it_was() {
     let c2 = control.clone();
     let err = f
         .lib
-        .scan(&f.client, &f.creator, ScanMode::Update, &control, move |p| {
-            if p.pages == 1 {
+        .scan(&f.client, &f.creator, ScanMode::Update, &control, move |step| {
+            if matches!(step, ScanStep::Page(p) if p.pages == 1) {
                 c2.cancel();
             }
         })
@@ -740,4 +744,218 @@ fn the_data_directory_is_a_parameter_and_is_created_on_open() {
     assert!(lib.path().ends_with("nested/data/library.sqlite3"));
     assert!(lib.path().exists());
     assert!(lib.profiles().unwrap().is_empty());
+}
+
+// ---- DAN-1661: labels, change summary, steps, loading, refilling -----------------------------
+
+fn labels(f: &Fixture) -> HashMap<String, Option<PostLabel>> {
+    let at = f.lib.profile(&f.creator).unwrap().unwrap().last_change.map(|c| c.at);
+    f.lib.posts(&f.creator).unwrap().into_iter().map(|p| (p.post_id.clone(), p.label(at))).collect()
+}
+
+fn count_of(l: &HashMap<String, Option<PostLabel>>, which: Option<PostLabel>) -> usize {
+    l.values().filter(|x| **x == which).count()
+}
+
+/// D1: New / Updated belong to the most recent update that found a change, survive restarts and
+/// updates that find nothing, and are replaced by the next update that finds something. Gone stays
+/// while the post is gone; a post that comes back is Updated.
+#[tokio::test]
+async fn labels_belong_to_the_last_update_that_found_a_change() {
+    let f = fixture(fanbox("119251"), small_posts(), "u1").await;
+    f.scan(ScanMode::Update).await;
+    let first = f.lib.profile(&f.creator).unwrap().unwrap();
+    assert_eq!(first.last_change, None, "a first scan is a baseline, not a change");
+    assert!(labels(&f).values().all(Option::is_none), "no labels after the baseline scan");
+
+    // Update 1: one added, one edited, one removed.
+    tick(&f, 100);
+    let posts = small_posts();
+    let (edited_id, gone_id) = (id_of(&posts[0]), id_of(&posts[1]));
+    {
+        let mut p = posts.clone();
+        p.remove(1);
+        p[0]["edited"] = json!("2026-10-17T05:14:43");
+        let mut added = p[0].clone();
+        added["id"] = json!("99999999");
+        added["title"] = json!("Brand new");
+        added["file"] = json!({"name": "new.png", "path": format!("/aa/bb/{}.png", "a".repeat(64))});
+        added["attachments"] = json!([]);
+        p.insert(0, added);
+        f.world().set_posts(p);
+        f.world().set_updated("u2");
+    }
+    let u1 = f.scan(ScanMode::Update).await;
+    assert_eq!((u1.new_posts, u1.updated_posts, u1.gone_posts, u1.new_files), (1, 1, 1, 1));
+    let rec = f.lib.profile(&f.creator).unwrap().unwrap();
+    let c = rec.last_change.expect("an update that found a change");
+    assert_eq!((c.new_posts, c.updated_posts, c.new_files, c.gone_posts), (1, 1, 1, 1));
+    let l = labels(&f);
+    assert_eq!(l["99999999"], Some(PostLabel::New));
+    assert_eq!(l[&edited_id], Some(PostLabel::Updated));
+    assert_eq!(l[&gone_id], Some(PostLabel::Gone));
+    assert_eq!((count_of(&l, Some(PostLabel::New)), count_of(&l, Some(PostLabel::Updated))), (1, 1));
+
+    // They survive a restart ...
+    let again = Library::open(f.data_dir.path()).unwrap();
+    let rec2 = again.profile(&f.creator).unwrap().unwrap();
+    assert_eq!(rec2.last_change, rec.last_change);
+    // ... and an update that finds nothing (quick path, then a full read that changes nothing).
+    tick(&f, 100);
+    assert!(f.scan(ScanMode::Update).await.unchanged);
+    tick(&f, 100);
+    f.world().set_updated("u3");
+    let nothing = f.scan(ScanMode::Update).await;
+    assert_eq!((nothing.new_posts, nothing.updated_posts, nothing.gone_posts), (0, 0, 0));
+    assert_eq!(labels(&f), l, "an update that finds nothing leaves the labels alone");
+    assert_eq!(f.lib.profile(&f.creator).unwrap().unwrap().last_change, rec.last_change);
+
+    // Update 2 finds a different change: the old New / Updated labels go, Gone stays.
+    tick(&f, 100);
+    {
+        let mut p = f.world().listing.clone();
+        let last = p.len() - 1;
+        p[last]["edited"] = json!("2026-10-17T09:09:09");
+        f.world().set_posts(p);
+        f.world().set_updated("u4");
+    }
+    let u2 = f.scan(ScanMode::Update).await;
+    assert_eq!((u2.new_posts, u2.updated_posts, u2.gone_posts), (0, 1, 0));
+    let l2 = labels(&f);
+    assert_eq!(l2["99999999"], None, "the earlier New is replaced");
+    assert_eq!(l2[&edited_id], None, "the earlier Updated is replaced");
+    assert_eq!(l2[&gone_id], Some(PostLabel::Gone), "Gone stays for as long as the post is gone");
+    assert_eq!(count_of(&l2, Some(PostLabel::Updated)), 1);
+
+    // The post comes back: Gone clears and it is Updated.
+    tick(&f, 100);
+    {
+        let mut p = f.world().listing.clone();
+        p.push(posts[1].clone());
+        f.world().set_posts(p);
+        f.world().set_updated("u5");
+    }
+    let back = f.scan(ScanMode::Update).await;
+    assert_eq!((back.new_posts, back.updated_posts, back.gone_posts), (0, 1, 0));
+    assert_eq!(labels(&f)[&gone_id], Some(PostLabel::Updated));
+}
+
+/// Two scans that read the same clock second must still give the second scan's posts their own stamp.
+#[tokio::test]
+async fn a_second_scan_in_the_same_second_does_not_relabel_the_baseline_as_new() {
+    let f = fixture(fanbox("119251"), small_posts(), "u1").await;
+    f.scan(ScanMode::Update).await;
+    {
+        let mut p = f.world().listing.clone();
+        p[1]["edited"] = json!("2026-10-17T05:14:43");
+        f.world().set_posts(p);
+        f.world().set_updated("u2");
+    }
+    f.scan(ScanMode::Update).await; // the clock never moved
+    let l = labels(&f);
+    assert_eq!((count_of(&l, Some(PostLabel::New)), count_of(&l, Some(PostLabel::Updated))), (0, 1), "{l:?}");
+}
+
+#[tokio::test]
+async fn a_scan_reports_its_steps_in_order() {
+    let f = fixture(fanbox("119251"), two_page_posts(), "u1").await;
+    let steps = || {
+        let log = Arc::new(Mutex::new(Vec::<ScanStep>::new()));
+        let l2 = log.clone();
+        (log, move |s| l2.lock().unwrap().push(s))
+    };
+    let run = |mode: ScanMode| {
+        let (log, cb) = steps();
+        let f = &f;
+        async move {
+            f.lib.scan(&f.client, &f.creator, mode, &Control::new(), cb).await.unwrap();
+            let v = log.lock().unwrap().clone();
+            v
+        }
+    };
+    // First scan: Checking, Reading, two pages. Nothing to check afterwards.
+    let first = run(ScanMode::Update).await;
+    assert_eq!(first[0], ScanStep::Checking);
+    assert_eq!(first[1], ScanStep::Reading);
+    assert!(matches!(first[2], ScanStep::Page(p) if p.pages == 1));
+    assert!(matches!(first[3], ScanStep::Page(p) if p.pages == 2));
+    assert_eq!(first.len(), 4);
+    // Unchanged: Checking and nothing else.
+    assert_eq!(run(ScanMode::Update).await, vec![ScanStep::Checking]);
+    // Full rescan: no Checking, goes straight to reading.
+    let full = run(ScanMode::Full).await;
+    assert_eq!(full[0], ScanStep::Reading);
+    // One saved post missing from the list: Missing 0 of 1, then 1 of 1.
+    {
+        let mut p = f.world().listing.clone();
+        p.remove(1);
+        f.world().set_posts(p);
+        f.world().set_updated("u2");
+    }
+    let missing = run(ScanMode::Update).await;
+    let tail: Vec<_> = missing.iter().rev().take(2).rev().cloned().collect();
+    assert_eq!(tail, vec![ScanStep::Missing { done: 0, total: 1 }, ScanStep::Missing { done: 1, total: 1 }]);
+}
+
+#[tokio::test]
+async fn load_returns_the_post_list_files_and_links_as_the_screen_wants_them() {
+    let f = fixture(fanbox("119251"), small_posts(), "u1").await;
+    assert!(f.lib.load(&f.creator).unwrap().is_none());
+    f.scan(ScanMode::Update).await;
+    let before = f.lib.load(&f.creator).unwrap().unwrap();
+    assert_eq!(before.posts.len(), 3);
+    assert!(before.files.iter().all(|x| !x.downloaded && x.pending == !x.entry.missing));
+    f.download().await;
+    let after = f.lib.load(&f.creator).unwrap().unwrap();
+    assert_eq!(after.files.len(), before.files.len());
+    assert!(after.files.iter().all(|x| x.downloaded && !x.pending && x.saved_path.is_some()));
+    assert_eq!(after.record.posts, 3);
+
+    // Pawchive holds no copy of any file of this profile: every one comes back as missing, none pending.
+    let g = fixture(fanbox("1386751"), no_edited_posts(), "u1").await;
+    g.scan(ScanMode::Update).await;
+    let gone = g.lib.load(&g.creator).unwrap().unwrap();
+    assert!(!gone.files.is_empty());
+    assert!(gone.files.iter().all(|x| x.entry.missing && !x.pending && !x.downloaded));
+}
+
+/// Download all fills a gap at the old place and never overwrites; a file that is there is left alone.
+#[tokio::test]
+async fn downloading_everything_refills_a_deleted_file_in_place_and_leaves_the_rest_alone() {
+    let f = fixture(fanbox("119251"), small_posts(), "u1").await;
+    f.scan(ScanMode::Update).await;
+    f.download().await;
+    let loaded = f.lib.load(&f.creator).unwrap().unwrap();
+    let victim = loaded.files.iter().find(|x| x.saved_path.is_some()).unwrap().clone();
+    let victim_path = victim.saved_path.clone().unwrap();
+    let other = loaded.files.iter().find(|x| x.saved_path != victim.saved_path).unwrap().clone();
+    let other_path = other.saved_path.clone().unwrap();
+    let other_bytes = std::fs::read(&other_path).unwrap();
+    std::fs::remove_file(&victim_path).unwrap();
+
+    let keys: std::collections::HashSet<(String, String)> =
+        loaded.files.iter().map(|x| (x.entry.post_id.clone(), x.entry.path.clone())).collect();
+    assert!(f.lib.download_candidates(&f.creator, &keys, true).unwrap().is_empty(), "new only: nothing is new");
+    let all = f.lib.download_candidates(&f.creator, &keys, false).unwrap();
+    assert_eq!(all.len(), loaded.files.len());
+
+    let mut plan = f.lib.plan_download(&f.creator, f.out_dir.path(), all).unwrap();
+    for j in &mut plan.jobs {
+        let t = &plan.targets[&j.id];
+        j.url = f.client.hosts.full_url(&t.path);
+    }
+    let dests: Vec<_> = plan.jobs.iter().map(|j| j.dest.clone()).collect();
+    assert!(dests.contains(&victim_path), "the gap is refilled at the old place");
+    assert!(!dests.iter().any(|d| d.to_string_lossy().contains(" (2)")), "no new name for a file that is known");
+    let events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let e2 = events.clone();
+    let summary = f
+        .engine()
+        .with_no_replace()
+        .run(plan.jobs.clone(), Control::new(), move |ev| e2.lock().unwrap().push(ev))
+        .await;
+    assert_eq!((summary.done, summary.failed), (1, 0), "only the deleted file is fetched: {summary:?}");
+    assert_eq!(summary.skipped, loaded.files.len() - 1);
+    assert_eq!(std::fs::read(&victim_path).unwrap(), body_of(&victim.entry.path));
+    assert_eq!(std::fs::read(&other_path).unwrap(), other_bytes);
 }

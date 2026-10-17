@@ -362,19 +362,31 @@ pub fn classify_url(raw: &str) -> Option<(Host, LinkKind, Option<String>, String
 /// order, then unsupported hosts grouped by host (most links first, ties by first appearance).
 /// The order depends only on the scan, so it never changes while the app runs.
 pub fn collect(posts: &[Post]) -> Vec<Link> {
+    let found: Vec<(PostRef, Vec<String>)> = posts
+        .iter()
+        .map(|post| {
+            let mut urls = extract_urls(&post.content);
+            if let Some(e) = &post.embed {
+                if !e.url.trim().is_empty() {
+                    urls.push(e.url.trim().to_string());
+                }
+                urls.extend(extract_urls(&e.description));
+            }
+            (PostRef { id: post.id.clone(), title: post.title.clone(), published: post.published.clone() }, urls)
+        })
+        .collect();
+    from_urls(&found)
+}
+
+/// [`collect`] for URLs already extracted per post (the saved library keeps them that way), in the
+/// same order, de-duplicated and sorted the same way.
+pub fn from_urls(found: &[(PostRef, Vec<String>)]) -> Vec<Link> {
     let mut links: Vec<Link> = Vec::new();
     let mut by_key: HashMap<String, usize> = HashMap::new();
-    for post in posts {
-        let mut urls = extract_urls(&post.content);
-        if let Some(e) = &post.embed {
-            if !e.url.trim().is_empty() {
-                urls.push(e.url.trim().to_string());
-            }
-            urls.extend(extract_urls(&e.description));
-        }
+    for (pref, urls) in found {
         for u in urls {
-            let Some((host, kind, name_hint, key)) = classify_url(&u) else { continue };
-            let pref = PostRef { id: post.id.clone(), title: post.title.clone(), published: post.published.clone() };
+            let Some((host, kind, name_hint, key)) = classify_url(u) else { continue };
+            let pref = pref.clone();
             match by_key.get(&key) {
                 Some(&i) => {
                     if !links[i].posts.iter().any(|p| p.id == pref.id) {

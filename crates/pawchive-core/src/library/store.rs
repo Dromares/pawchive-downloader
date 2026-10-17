@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::links::Link;
 use crate::model::{FileEntry, Post, Service};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE profiles (
@@ -24,6 +24,11 @@ CREATE TABLE profiles (
     site_updated TEXT,
     last_scanned_at INTEGER,
     last_full_read_at INTEGER,
+    last_change_at INTEGER,
+    change_new_posts INTEGER NOT NULL DEFAULT 0,
+    change_updated INTEGER NOT NULL DEFAULT 0,
+    change_new_files INTEGER NOT NULL DEFAULT 0,
+    change_gone INTEGER NOT NULL DEFAULT 0,
     UNIQUE (service, creator_id)
 );
 CREATE TABLE posts (
@@ -37,6 +42,7 @@ CREATE TABLE posts (
     removed_at INTEGER,
     folder TEXT,
     first_seen_at INTEGER NOT NULL,
+    changed_at INTEGER,
     PRIMARY KEY (profile_id, post_id)
 );
 CREATE TABLE files (
@@ -61,6 +67,17 @@ CREATE TABLE external_links (
     PRIMARY KEY (profile_id, post_id, url),
     FOREIGN KEY (profile_id, post_id) REFERENCES posts(profile_id, post_id) ON DELETE CASCADE
 );
+";
+
+/// Schema 1 -> 2 (DAN-1661): columns for the New / Updated labels and the last-update counts.
+/// Additive only: no row is rewritten, so `downloaded`, `saved_path` and `folder` are untouched.
+const MIGRATE_1_TO_2: &str = "
+ALTER TABLE profiles ADD COLUMN last_change_at INTEGER;
+ALTER TABLE profiles ADD COLUMN change_new_posts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE profiles ADD COLUMN change_updated INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE profiles ADD COLUMN change_new_files INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE profiles ADD COLUMN change_gone INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE posts ADD COLUMN changed_at INTEGER;
 ";
 
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
@@ -92,6 +109,29 @@ pub struct ProfileRecord {
     pub posts: usize,
     /// Posts marked gone from the site.
     pub gone: usize,
+    /// The last update that found a change. `None` until one has (a first scan is a baseline, not a
+    /// change).
+    pub last_change: Option<ChangeSummary>,
+}
+
+/// What the last update that found a change found. Advanced only by a scan that finds at least one
+/// new, updated or gone post, so an update that finds nothing leaves it (and the labels) alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChangeSummary {
+    /// Unix seconds of that update: the stamp `first_seen_at` / `changed_at` of its posts carry.
+    pub at: i64,
+    pub new_posts: usize,
+    pub updated_posts: usize,
+    pub new_files: usize,
+    pub gone_posts: usize,
+}
+
+/// The label a post carries in the Posts tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PostLabel {
+    New,
+    Updated,
+    Gone,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,8 +167,31 @@ pub struct PostRecord {
     pub removed_at: Option<i64>,
     /// The post's folder name under the creator folder, fixed when its first file is saved.
     pub folder: Option<String>,
+    /// Unix seconds of the scan that first saw the post.
+    pub first_seen_at: i64,
+    /// Unix seconds of the scan that found the post edited or changed, or back after being gone.
+    /// `None` for a post never changed since it was first seen.
+    pub changed_at: Option<i64>,
     pub files: Vec<FileRecord>,
     pub links: Vec<LinkRecord>,
+}
+
+impl PostRecord {
+    /// `Gone` while the post is gone; else `New` if the last change-finding update first saw it,
+    /// `Updated` if that update changed it; else none. `last_change_at` is the profile's.
+    pub fn label(&self, last_change_at: Option<i64>) -> Option<PostLabel> {
+        if self.removed_at.is_some() {
+            return Some(PostLabel::Gone);
+        }
+        let at = last_change_at?;
+        if self.first_seen_at == at {
+            Some(PostLabel::New)
+        } else if self.changed_at == Some(at) {
+            Some(PostLabel::Updated)
+        } else {
+            None
+        }
+    }
 }
 
 /// What a scan needs from the saved copy of one post.
@@ -149,6 +212,8 @@ pub(crate) struct Saved {
 
 pub(crate) struct PostWrite {
     pub post: Post,
+    /// The saved copy changed (edited, fingerprint moved, or the post came back): stamps `changed_at`.
+    pub changed: bool,
     pub fingerprint: String,
     /// `(file, available)`
     pub files: Vec<(FileEntry, bool)>,
@@ -163,6 +228,17 @@ pub(crate) struct ScanWrite<'a> {
     pub full_read: bool,
     pub posts: Vec<PostWrite>,
     pub gone: Vec<String>,
+    /// The counts of an update that found a change on a saved profile; `None` for the first scan
+    /// (a baseline) and for a scan that found nothing.
+    pub change: Option<ChangeCounts>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ChangeCounts {
+    pub new_posts: usize,
+    pub updated_posts: usize,
+    pub new_files: usize,
+    pub gone_posts: usize,
 }
 
 /// The content hash of a Pawchive file path: its stem when that is 64 hex digits.
@@ -294,7 +370,8 @@ impl Library {
             }
         }
         let mut stmt = conn.prepare(
-            "SELECT post_id, title, published, added, edited, fingerprint, removed_at, folder FROM posts
+            "SELECT post_id, title, published, added, edited, fingerprint, removed_at, folder, first_seen_at,
+                    changed_at FROM posts
              WHERE profile_id = ?1 ORDER BY published DESC, post_id DESC",
         )?;
         let rows = stmt.query_map([pid], |r| {
@@ -307,6 +384,8 @@ impl Library {
                 fingerprint: r.get(5)?,
                 removed_at: r.get(6)?,
                 folder: r.get(7)?,
+                first_seen_at: r.get(8)?,
+                changed_at: r.get(9)?,
                 files: Vec::new(),
                 links: Vec::new(),
             })
@@ -366,6 +445,17 @@ impl Library {
         let now = self.now();
         let mut conn = self.lock();
         let tx = conn.transaction()?;
+        // Posts first seen or changed by this scan carry one stamp, which must be later than anything
+        // an earlier scan of the profile wrote, or a label could not tell the two scans apart.
+        let prev: Option<i64> = tx
+            .query_row(
+                "SELECT last_scanned_at FROM profiles WHERE service = ?1 AND creator_id = ?2",
+                params![w.creator.service.as_str(), w.creator.id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let stamp = prev.map_or(now, |t| now.max(t + 1));
         tx.execute(
             "INSERT INTO profiles (service, creator_id, name, site_updated, last_scanned_at, last_full_read_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -382,12 +472,26 @@ impl Library {
             |r| r.get(0),
         )?;
         for pw in &w.posts {
-            write_post(&tx, pid, pw, now)?;
+            write_post(&tx, pid, pw, stamp)?;
         }
         for id in &w.gone {
             tx.execute(
                 "UPDATE posts SET removed_at = ?3 WHERE profile_id = ?1 AND post_id = ?2 AND removed_at IS NULL",
                 params![pid, id, now],
+            )?;
+        }
+        if let Some(c) = w.change {
+            tx.execute(
+                "UPDATE profiles SET last_change_at = ?2, change_new_posts = ?3, change_updated = ?4,
+                        change_new_files = ?5, change_gone = ?6 WHERE id = ?1",
+                params![
+                    pid,
+                    stamp,
+                    c.new_posts as i64,
+                    c.updated_posts as i64,
+                    c.new_files as i64,
+                    c.gone_posts as i64
+                ],
             )?;
         }
         tx.commit()?;
@@ -428,6 +532,45 @@ impl Library {
             }
         }
         Ok(out)
+    }
+
+    /// Every available file of a post still on the site, whether or not it was downloaded: what
+    /// "Download all" starts from. Same order as [`Library::pending`], no de-duplication by content.
+    pub(crate) fn available_files(&self, creator: &CreatorRef) -> Result<Vec<super::PendingFile>> {
+        let conn = self.lock();
+        let Some(pid) = profile_id(&conn, creator)? else { return Ok(Vec::new()) };
+        let mut stmt = conn.prepare(
+            "SELECT f.post_id, p.title, p.published, p.folder, f.name, f.path, f.hash
+             FROM files f JOIN posts p ON p.profile_id = f.profile_id AND p.post_id = f.post_id
+             WHERE f.profile_id = ?1 AND f.available = 1 AND p.removed_at IS NULL
+             ORDER BY p.published DESC, f.post_id DESC, f.rowid",
+        )?;
+        let rows = stmt.query_map([pid], |r| {
+            Ok(super::PendingFile {
+                post_id: r.get(0)?,
+                post_title: r.get(1)?,
+                post_published: r.get(2)?,
+                folder: r.get(3)?,
+                name: r.get(4)?,
+                path: r.get(5)?,
+                hash: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Where each downloaded file was saved, by `(post_id, path)`.
+    pub(crate) fn saved_locations(&self, creator: &CreatorRef) -> Result<HashMap<(String, String), PathBuf>> {
+        let conn = self.lock();
+        let Some(pid) = profile_id(&conn, creator)? else { return Ok(HashMap::new()) };
+        let mut stmt = conn.prepare(
+            "SELECT post_id, path, saved_path FROM files
+             WHERE profile_id = ?1 AND downloaded = 1 AND saved_path IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([pid], |r| {
+            Ok(((r.get::<_, String>(0)?, r.get::<_, String>(1)?), PathBuf::from(r.get::<_, String>(2)?)))
+        })?;
+        Ok(rows.collect::<std::result::Result<HashMap<_, _>, _>>()?)
     }
 
     /// Every path saved for the profile, lower-cased: names that are taken even if the file was
@@ -482,6 +625,13 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.commit()?;
             Ok(())
         }
+        1 => {
+            let tx = conn.transaction()?;
+            tx.execute_batch(MIGRATE_1_TO_2)?;
+            tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            tx.commit()?;
+            Ok(())
+        }
         SCHEMA_VERSION => Ok(()),
         other => Err(Error::Db(format!(
             "library.sqlite3 has schema version {other}; this version of the app understands {SCHEMA_VERSION}"
@@ -492,7 +642,8 @@ fn migrate(conn: &mut Connection) -> Result<()> {
 const PROFILE_SELECT_ALL: &str = "SELECT p.service, p.creator_id, p.name, p.site_updated, p.last_scanned_at,
         p.last_full_read_at,
         (SELECT COUNT(*) FROM posts q WHERE q.profile_id = p.id),
-        (SELECT COUNT(*) FROM posts q WHERE q.profile_id = p.id AND q.removed_at IS NOT NULL)
+        (SELECT COUNT(*) FROM posts q WHERE q.profile_id = p.id AND q.removed_at IS NOT NULL),
+        p.last_change_at, p.change_new_posts, p.change_updated, p.change_new_files, p.change_gone
      FROM profiles p";
 
 fn profile_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProfileRecord> {
@@ -507,6 +658,18 @@ fn profile_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProfileRecord> {
         last_full_read_at: r.get(5)?,
         posts: r.get::<_, i64>(6)? as usize,
         gone: r.get::<_, i64>(7)? as usize,
+        last_change: r
+            .get::<_, Option<i64>>(8)?
+            .map(|at| -> rusqlite::Result<ChangeSummary> {
+                Ok(ChangeSummary {
+                    at,
+                    new_posts: r.get::<_, i64>(9)? as usize,
+                    updated_posts: r.get::<_, i64>(10)? as usize,
+                    new_files: r.get::<_, i64>(11)? as usize,
+                    gone_posts: r.get::<_, i64>(12)? as usize,
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -525,15 +688,17 @@ fn profile_id(conn: &Connection, creator: &CreatorRef) -> Result<Option<i64>> {
         .optional()?)
 }
 
-fn write_post(tx: &Transaction<'_>, pid: i64, pw: &PostWrite, now: i64) -> Result<()> {
+fn write_post(tx: &Transaction<'_>, pid: i64, pw: &PostWrite, stamp: i64) -> Result<()> {
     let p = &pw.post;
+    // `first_seen_at` is written on insert only; `changed_at` moves only when the saved copy changed.
     tx.execute(
         "INSERT INTO posts (profile_id, post_id, title, published, added, edited, fingerprint, first_seen_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT (profile_id, post_id) DO UPDATE SET
             title = excluded.title, published = excluded.published, added = excluded.added,
-            edited = excluded.edited, fingerprint = excluded.fingerprint, removed_at = NULL",
-        params![pid, p.id, p.title, p.published, p.added, p.edited, pw.fingerprint, now],
+            edited = excluded.edited, fingerprint = excluded.fingerprint, removed_at = NULL,
+            changed_at = CASE WHEN ?9 THEN ?8 ELSE changed_at END",
+        params![pid, p.id, p.title, p.published, p.added, p.edited, pw.fingerprint, stamp, pw.changed],
     )?;
     // Files: refresh what the post lists, keep every downloaded row (a replaced file leaves the
     // old version recorded), drop only rows never downloaded that the post no longer lists.
@@ -595,6 +760,99 @@ mod tests {
         Connection::open(&path).unwrap().execute_batch("PRAGMA user_version = 99;").unwrap();
         let err = Library::open(dir.path()).unwrap_err().to_string();
         assert!(err.contains("schema version 99"), "{err}");
+    }
+
+    /// The schema exactly as version 1 (PR #15) created it.
+    const V1_SCHEMA: &str = "
+        CREATE TABLE profiles (id INTEGER PRIMARY KEY, service TEXT NOT NULL, creator_id TEXT NOT NULL, name TEXT,
+            site_updated TEXT, last_scanned_at INTEGER, last_full_read_at INTEGER, UNIQUE (service, creator_id));
+        CREATE TABLE posts (profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+            post_id TEXT NOT NULL, title TEXT NOT NULL, published TEXT, added TEXT, edited TEXT,
+            fingerprint TEXT NOT NULL, removed_at INTEGER, folder TEXT, first_seen_at INTEGER NOT NULL,
+            PRIMARY KEY (profile_id, post_id));
+        CREATE TABLE files (profile_id INTEGER NOT NULL, post_id TEXT NOT NULL, path TEXT NOT NULL,
+            name TEXT NOT NULL, hash TEXT NOT NULL, available INTEGER NOT NULL, downloaded INTEGER NOT NULL DEFAULT 0,
+            saved_path TEXT, PRIMARY KEY (profile_id, post_id, path),
+            FOREIGN KEY (profile_id, post_id) REFERENCES posts(profile_id, post_id) ON DELETE CASCADE);
+        CREATE INDEX files_by_hash ON files (profile_id, hash);
+        CREATE TABLE external_links (profile_id INTEGER NOT NULL, post_id TEXT NOT NULL, url TEXT NOT NULL,
+            host TEXT NOT NULL, downloadable INTEGER NOT NULL, PRIMARY KEY (profile_id, post_id, url),
+            FOREIGN KEY (profile_id, post_id) REFERENCES posts(profile_id, post_id) ON DELETE CASCADE);
+        PRAGMA user_version = 1;";
+
+    /// D1 (DAN-1661): the 1 -> 2 migration adds columns and rewrites nothing.
+    #[test]
+    fn a_version_1_database_migrates_without_touching_the_download_history() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(DB_FILE);
+        let rows = |c: &Connection| -> Vec<String> {
+            let mut out = Vec::new();
+            for sql in [
+                "SELECT service, creator_id, name, site_updated, last_scanned_at, last_full_read_at FROM profiles",
+                "SELECT profile_id, post_id, title, published, edited, fingerprint, removed_at, folder, first_seen_at
+                 FROM posts ORDER BY post_id",
+                "SELECT profile_id, post_id, path, name, hash, available, downloaded, saved_path
+                 FROM files ORDER BY post_id, path",
+            ] {
+                let mut stmt = c.prepare(sql).unwrap();
+                let n = stmt.column_count();
+                let mut r = stmt.query([]).unwrap();
+                while let Some(row) = r.next().unwrap() {
+                    out.push((0..n).map(|i| format!("{:?}", row.get_ref(i).unwrap())).collect::<Vec<_>>().join("|"));
+                }
+            }
+            out
+        };
+        let before = {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(V1_SCHEMA).unwrap();
+            c.execute_batch(
+                "INSERT INTO profiles VALUES (1, 'fanbox', '119251', 'Test', 'u1', 1800000000, 1800000000);
+                 INSERT INTO posts VALUES (1, 'p1', 'One', '2026-01-01', NULL, NULL, 'fp1', NULL, '2026-01-01 One', 1800000000);
+                 INSERT INTO posts VALUES (1, 'p2', 'Two', '2026-01-02', NULL, NULL, 'fp2', 1800000005, NULL, 1800000000);
+                 INSERT INTO files VALUES (1, 'p1', '/a/a.png', 'a.png', 'h1', 1, 1, '/out/fanbox_119251/2026-01-01 One/a.png');
+                 INSERT INTO files VALUES (1, 'p1', '/b/b.png', 'b.png', 'h2', 1, 0, NULL);
+                 INSERT INTO files VALUES (1, 'p2', '/c/c.png', 'c.png', 'h3', 0, 0, NULL);",
+            )
+            .unwrap();
+            rows(&c)
+        };
+        assert_eq!(before.len(), 1 + 2 + 3);
+
+        let lib = Library::open(dir.path()).unwrap();
+        let c = Connection::open(&path).unwrap();
+        let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(rows(&c), before, "no existing value was rewritten");
+        let (downloaded, saved, folder): (bool, String, String) = c
+            .query_row(
+                "SELECT f.downloaded, f.saved_path, p.folder FROM files f JOIN posts p
+                 ON p.profile_id = f.profile_id AND p.post_id = f.post_id WHERE f.path = '/a/a.png'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (downloaded, saved.as_str(), folder.as_str()),
+            (true, "/out/fanbox_119251/2026-01-01 One/a.png", "2026-01-01 One")
+        );
+        // The new columns exist and are empty: nothing is labelled until an update finds a change.
+        let creator = CreatorRef { service: Service::Fanbox, id: "119251".into() };
+        let rec = lib.profile(&creator).unwrap().unwrap();
+        assert_eq!((rec.posts, rec.gone, rec.last_change), (2, 1, None));
+        let posts = lib.posts(&creator).unwrap();
+        assert!(posts.iter().all(|p| p.changed_at.is_none() && p.first_seen_at == 1_800_000_000));
+        // And a fresh database ends up with the same columns as the migrated one.
+        let fresh_dir = tempfile::TempDir::new().unwrap();
+        Library::open(fresh_dir.path()).unwrap();
+        let cols = |c: &Connection, t: &str| -> Vec<String> {
+            let mut s = c.prepare(&format!("SELECT name FROM pragma_table_info('{t}')")).unwrap();
+            s.query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<std::result::Result<Vec<_>, _>>().unwrap()
+        };
+        let fresh = Connection::open(fresh_dir.path().join(DB_FILE)).unwrap();
+        for t in ["profiles", "posts", "files", "external_links"] {
+            assert_eq!(cols(&c, t), cols(&fresh, t), "table {t}");
+        }
     }
 
     #[test]
