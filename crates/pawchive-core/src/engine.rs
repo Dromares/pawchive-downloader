@@ -1,7 +1,7 @@
 //! The download engine: bounded concurrency, global request pacing, retry/backoff, `.part` files
 //! with `Range` resume, skip-existing, pause and cancel.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,6 +14,7 @@ use tokio::time::Instant;
 
 use crate::control::{Control, RunState};
 use crate::error::Error;
+use crate::external::{self, drive, mediafire, ExtClient, ExtHost, Notice, ResolveError};
 use crate::gate::Gate;
 use crate::http::{retry_after, Http, RetryPolicy};
 use crate::probe::total_from_content_range;
@@ -29,6 +30,25 @@ pub struct Job {
     pub expected_size: Option<u64>,
     /// Shown in the UI: `post folder/filename`.
     pub label: String,
+    /// Set for a file on Google Drive or Mediafire: `url` is then unused, and the download link is
+    /// found when the job runs.
+    pub ext: Option<ExtSource>,
+}
+
+/// Where an external file really comes from. Resolved at download time, never stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtSource {
+    Mediafire { page_url: String },
+    Drive { file_id: String },
+}
+
+impl ExtSource {
+    pub fn host(&self) -> ExtHost {
+        match self {
+            ExtSource::Mediafire { .. } => ExtHost::Mediafire,
+            ExtSource::Drive { .. } => ExtHost::Drive,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +86,18 @@ pub enum Event {
     Cancelled {
         id: u64,
     },
+    /// What the server said about an external file: its real name (`Content-Disposition`) and
+    /// Content-Type. The file's type is decided from these, never from the link text.
+    Meta {
+        id: u64,
+        name: Option<String>,
+        content_type: Option<String>,
+    },
+    /// An external host answered 403/429: only its own requests stop for this long.
+    ExtCooldown {
+        host: ExtHost,
+        secs: u64,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -94,6 +126,7 @@ pub struct Engine {
     http: Http,
     gate: Gate,
     cfg: Arc<EngineConfig>,
+    ext: Option<Arc<ExtClient>>,
 }
 
 type Emit = Arc<dyn Fn(Event) + Send + Sync>;
@@ -122,6 +155,40 @@ enum Step {
     },
 }
 
+/// The jobs still to start, plus the external hosts that already have a download running (at most
+/// one at a time per external host, so a worker never sits idle behind a busy host).
+struct Queue {
+    jobs: VecDeque<Job>,
+    busy: HashSet<ExtHost>,
+}
+
+/// The first queued job whose host is free, marked busy. Waits while every queued job is behind a
+/// busy host; `None` when the queue is empty or the run was cancelled.
+async fn next_job(queue: &Mutex<Queue>, wake: &tokio::sync::Notify, control: &Control) -> Option<Job> {
+    loop {
+        let notified = wake.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        {
+            let mut q = queue.lock().unwrap();
+            if q.jobs.is_empty() {
+                return None;
+            }
+            let pos = q.jobs.iter().position(|j| j.ext.as_ref().is_none_or(|e| !q.busy.contains(&e.host())));
+            if let Some(job) = pos.and_then(|p| q.jobs.remove(p)) {
+                if let Some(e) = &job.ext {
+                    q.busy.insert(e.host());
+                }
+                return Some(job);
+            }
+        }
+        tokio::select! {
+            _ = &mut notified => {}
+            _ = control.cancelled() => return None,
+        }
+    }
+}
+
 fn part_path(dest: &Path) -> PathBuf {
     let mut s = dest.as_os_str().to_owned();
     s.push(".part");
@@ -131,27 +198,40 @@ fn part_path(dest: &Path) -> PathBuf {
 impl Engine {
     pub fn new(http: Http, gate: Gate, cfg: EngineConfig) -> Self {
         let cfg = EngineConfig { concurrency: cfg.concurrency.clamp(1, MAX_CONCURRENCY), ..cfg };
-        Engine { http, gate, cfg: Arc::new(cfg) }
+        Engine { http, gate, cfg: Arc::new(cfg), ext: None }
+    }
+
+    /// Allow jobs with an [`ExtSource`]. They use this client (no cookies, plain user agent) and the
+    /// per-host clocks inside it, never the Pawchive gate.
+    pub fn with_external(mut self, ext: ExtClient) -> Self {
+        self.ext = Some(Arc::new(ext));
+        self
     }
 
     /// Run `jobs` to completion (or cancellation). Events are delivered through `emit`.
     pub async fn run(&self, jobs: Vec<Job>, control: Control, emit: impl Fn(Event) + Send + Sync + 'static) -> Summary {
         let total = jobs.len();
         let emit: Emit = Arc::new(emit);
-        let queue = Arc::new(Mutex::new(VecDeque::from(jobs)));
+        let queue = Arc::new(Mutex::new(Queue { jobs: VecDeque::from(jobs), busy: HashSet::new() }));
+        let wake = Arc::new(tokio::sync::Notify::new());
         let tally = Arc::new(Mutex::new(Summary::default()));
         let mut workers = JoinSet::new();
         for _ in 0..self.cfg.concurrency {
-            let (eng, queue, tally, control, emit) =
-                (self.clone(), queue.clone(), tally.clone(), control.clone(), emit.clone());
+            let (eng, queue, tally, control, emit, wake) =
+                (self.clone(), queue.clone(), tally.clone(), control.clone(), emit.clone(), wake.clone());
             workers.spawn(async move {
                 loop {
                     // Pause stops new starts; cancel stops everything.
                     if !control.wait_while_paused().await {
                         break;
                     }
-                    let Some(job) = queue.lock().unwrap().pop_front() else { break };
+                    let Some(job) = next_job(&queue, &wake, &control).await else { break };
+                    let host = job.ext.as_ref().map(ExtSource::host);
                     let outcome = eng.transfer(&job, &control, &emit).await;
+                    if let Some(h) = host {
+                        queue.lock().unwrap().busy.remove(&h);
+                        wake.notify_waiters();
+                    }
                     let mut t = tally.lock().unwrap();
                     match outcome {
                         Outcome::Done(bytes) => {
@@ -197,7 +277,8 @@ impl Engine {
         let policy = &self.cfg.retry;
         let mut attempt = 0u32;
         loop {
-            if !control.wait_while_paused().await || !self.gate.acquire(control).await {
+            // External hosts keep their own clocks (inside `ExtClient::get`); the Pawchive gate is not theirs.
+            if !control.wait_while_paused().await || (job.ext.is_none() && !self.gate.acquire(control).await) {
                 return Outcome::Cancelled;
             }
             match self.attempt(job, &part, control, emit).await {
@@ -226,16 +307,24 @@ impl Engine {
 
     async fn attempt(&self, job: &Job, part: &Path, control: &Control, emit: &Emit) -> Step {
         let existing = fs::metadata(part).await.map(|m| m.len()).unwrap_or(0);
-        let mut req = self.http.get(&job.url);
-        if existing > 0 {
-            req = req.header(RANGE, format!("bytes={existing}-"));
-        }
-        let mut resp = tokio::select! {
-            r = req.send() => match r {
+        let range = (existing > 0).then(|| format!("bytes={existing}-"));
+        let mut resp = if let Some(src) = &job.ext {
+            match self.open_external(job, src, range, control, emit).await {
                 Ok(r) => r,
-                Err(e) => return Step::Retry { reason: Error::from_reqwest(e).to_string(), retry_after: None, bot_block: false },
-            },
-            _ = control.cancelled() => return Step::Cancelled,
+                Err(step) => return step,
+            }
+        } else {
+            let mut req = self.http.get(&job.url);
+            if let Some(r) = range {
+                req = req.header(RANGE, r);
+            }
+            tokio::select! {
+                r = req.send() => match r {
+                    Ok(r) => r,
+                    Err(e) => return Step::Retry { reason: Error::from_reqwest(e).to_string(), retry_after: None, bot_block: false },
+                },
+                _ = control.cancelled() => return Step::Cancelled,
+            }
         };
         let status = resp.status().as_u16();
         let retry = |reason: String, ra| Step::Retry { reason, retry_after: ra, bot_block: false };
@@ -322,6 +411,62 @@ impl Engine {
         }
         emit(Event::Progress { id: job.id, done, total: Some(done) });
         finish(part, &job.dest, done).await
+    }
+}
+
+impl Engine {
+    /// Find the real download link of an external file and open it. For Mediafire the file page is
+    /// read now and its signed link used at once; for Drive the virus-scan page, if any, is passed.
+    async fn open_external(
+        &self,
+        job: &Job,
+        src: &ExtSource,
+        range: Option<String>,
+        control: &Control,
+        emit: &Emit,
+    ) -> Result<reqwest::Response, Step> {
+        let Some(ext) = &self.ext else {
+            return Err(Step::Fail { error: "external downloads are not set up".into(), permanent: true });
+        };
+        let notify = |n: Notice| match n {
+            Notice::Cooldown { host, secs } => emit(Event::ExtCooldown { host, secs }),
+        };
+        let host = src.host();
+        let opened = match src {
+            ExtSource::Drive { file_id } => drive::open_file(ext, file_id, range, control, &notify).await,
+            ExtSource::Mediafire { page_url } => match mediafire::direct_url(ext, page_url, control, &notify).await {
+                Ok((direct, _)) => {
+                    let extra: Vec<(&str, String)> = range.map(|r| (RANGE.as_str(), r)).into_iter().collect();
+                    match ext.get(host, control, &notify, &direct, &extra).await {
+                        Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
+                            Err(ResolveError::Dead(external::DeadReason::Removed))
+                        }
+                        Ok(r) if external::is_html(&r) => {
+                            Err(ResolveError::transient("Mediafire sent a web page instead of the file"))
+                        }
+                        Ok(r) => Ok(r),
+                        Err(e) => Err(e.into()),
+                    }
+                }
+                Err(e) => Err(e),
+            },
+        };
+        match opened {
+            Ok(resp) => {
+                let meta = external::download_meta(&resp);
+                emit(Event::Meta { id: job.id, name: meta.name, content_type: meta.content_type });
+                Ok(resp)
+            }
+            Err(ResolveError::Cancelled) => Err(Step::Cancelled),
+            Err(ResolveError::Dead(r)) => Err(Step::Fail { error: r.text(host), permanent: true }),
+            Err(ResolveError::Transient { quota: true, .. }) => Err(Step::Fail {
+                error: format!("Download limit reached on {}. Try again later.", host.name()),
+                permanent: false,
+            }),
+            Err(ResolveError::Transient { message, .. }) => {
+                Err(Step::Retry { reason: message, retry_after: None, bot_block: false })
+            }
+        }
     }
 }
 

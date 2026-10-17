@@ -30,6 +30,32 @@ impl Http {
         Ok(Http { client, cookies: cookies.filter(|c| !c.is_empty()).map(Arc::new) })
     }
 
+    /// The client for Google Drive and Mediafire: the plain `pawchive-downloader/<version>` user
+    /// agent (no contact string) and no cookies, ever. Those belong to pawchive.pw alone.
+    ///
+    /// Redirects are followed, except to a Google sign-in page or Mediafire's `/error.php`: those
+    /// come back as the 3xx so the caller can tell a private or removed file from a network error.
+    pub fn external() -> Result<Self> {
+        let policy = reqwest::redirect::Policy::custom(|attempt| {
+            let u = attempt.url();
+            if u.host_str() == Some("accounts.google.com") || u.path() == "/error.php" {
+                attempt.stop()
+            } else if attempt.previous().len() >= 8 {
+                attempt.error("too many redirects")
+            } else {
+                attempt.follow()
+            }
+        });
+        let client = Client::builder()
+            .user_agent(format!("pawchive-downloader/{}", crate::VERSION))
+            .connect_timeout(Duration::from_secs(20))
+            .read_timeout(Duration::from_secs(60))
+            .redirect(policy)
+            .build()
+            .map_err(Error::from_reqwest)?;
+        Ok(Http { client, cookies: None })
+    }
+
     pub fn get(&self, url: &str) -> RequestBuilder {
         let mut rb = self.client.get(url);
         if let (Some(jar), Ok(parsed)) = (&self.cookies, url::Url::parse(url)) {

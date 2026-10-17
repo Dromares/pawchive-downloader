@@ -5,6 +5,8 @@ mod app;
 mod derive;
 mod dev;
 mod format;
+mod links_state;
+mod links_view;
 mod modals;
 mod state;
 mod theme;
@@ -28,7 +30,7 @@ fn main() -> eframe::Result {
     let settings = Settings::load();
     let mut hosts = Hosts::default();
     if let Some(base) = dev::base_url_override() {
-        hosts = Hosts { api: base.clone(), file: base.clone(), thumb: base };
+        hosts = Hosts { api: base.clone(), file: base.clone(), thumb: base.clone(), external: Some(base) };
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

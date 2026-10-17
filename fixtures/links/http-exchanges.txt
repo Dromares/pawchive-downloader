@@ -1,0 +1,61 @@
+# Captured 2026-10-17. Header whitelist only (status, location, content-type/length/range/disposition, accept-ranges): cookies, cf-ray, nonces, upload ids and signed tokens are dropped.
+
+## Drive single file (Super Girl.jpg, 2645191 B) step 1: GET https://drive.google.com/uc?export=download&id=1NuahpS2FM-oKpZMgwz1CXgCqIljIOAjA
+HTTP/2 303 
+content-type: application/binary
+location: https://drive.usercontent.google.com/download?id=1NuahpS2FM-oKpZMgwz1CXgCqIljIOAjA&export=download
+content-length: 0
+
+## step 2: GET https://drive.usercontent.google.com/download?id=1NuahpS2FM-oKpZMgwz1CXgCqIljIOAjA&export=download (Range: bytes=0-0)
+HTTP/2 206 
+content-type: image/jpeg
+content-disposition: attachment; filename="Super Girl.jpg"
+accept-ranges: bytes
+content-length: 1
+content-range: bytes 0-0/2645191
+
+## Drive Super Girl.psd (89567214 B, under 100 MB: no virus-scan page), step 2 (Range: bytes=0-0)
+HTTP/2 206 
+content-type: application/octet-stream
+content-disposition: attachment; filename="Super Girl.psd"
+accept-ranges: bytes
+content-length: 1
+content-range: bytes 0-0/89567214
+
+## Same psd, no Range header: 200, whole body (body not saved)
+HTTP/2 200 
+content-type: application/octet-stream
+content-disposition: attachment; filename="Super Girl.psd"
+accept-ranges: bytes
+content-length: 89567214
+
+## Virus-scan sample img_align_celeba.zip (1.3 GB, public CelebA mirror, id 0B7EVK8r0v71pZjFTYXZWM3FlRnM): step 1 = 200 text/html (drive-virus-scan-confirm.html); then GET https://drive.usercontent.google.com/download?id=0B7EVK8r0v71pZjFTYXZWM3FlRnM&export=download&confirm=t&uuid=<from form> (Range: bytes=0-0)
+HTTP/2 206 
+content-type: application/octet-stream
+content-disposition: attachment; filename="img_align_celeba.zip"
+accept-ranges: bytes
+content-length: 1
+content-range: bytes 0-0/1443490838
+
+## Mediafire direct URL taken from the file page's #downloadButton href (Range: bytes=0-0)
+HTTP/1.1 206 Partial Content
+content-type: application/x-rar
+accept-ranges: bytes
+content-disposition: attachment; filename="Super Girl.rar"
+content-length: 1
+content-range: bytes 0-0/70169468
+
+## Mediafire file page GET https://www.mediafire.com/file/uikej85vz8b2h7z/Super_Girl.rar/file
+HTTP/2 200 
+content-type: text/html; charset=UTF-8
+
+## Mediafire deleted key GET https://www.mediafire.com/file/zzzzzzzzzzzzzzz/gone.rar/file (-L: 302 then 404)
+HTTP/2 302 
+content-type: text/html; charset=UTF-8
+location: /error.php?errno=320&origin=download
+HTTP/2 404 
+content-type: text/html; charset=UTF-8
+
+## pawchive post API GET /api/v1/patreon/user/5163822/post/162546844
+HTTP/2 200 
+content-type: application/json

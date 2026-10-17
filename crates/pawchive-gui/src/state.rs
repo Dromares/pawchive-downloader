@@ -1,16 +1,20 @@
 //! Pure view-model: everything the screen shows, updated from session events and user actions.
 //! No egui here, so the state machine from `ui-spec` section 5 is unit-testable.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pawchive_core::api::ScanProgress;
-use pawchive_core::creator::CreatorRef;
+use pawchive_core::creator::{CreatorRef, ScanTarget};
 use pawchive_core::engine::{Event, Summary};
+use pawchive_core::external::ExtHost;
+use pawchive_core::links::{self, PostRef};
 use pawchive_core::model::FileEntry;
+use pawchive_core::plan::JobOrigin;
 use pawchive_core::session::UiEvent;
 
 use crate::format::human_size;
+use crate::links_state::{Check, LinkFilter, LinkRow};
 
 const LOG_CAP: usize = 1000;
 /// Overall speed is averaged over this window; ETA needs this much run time first.
@@ -68,9 +72,35 @@ pub struct Row {
     pub state: RowState,
     pub done: u64,
     pub total: Option<u64>,
+    /// A Pawchive file, or a file of an external link. Link files are listed in the External links
+    /// tab, never in the Files tab, but they are jobs like any other and count in the totals.
+    pub origin: JobOrigin,
+    /// The name on disk differs from the file's own (`4 (2).png`).
+    pub renamed: bool,
+    /// What the server said about a link file (never the link text): `Content-Type` and the real name.
+    pub content_type: Option<String>,
+    pub real_name: Option<String>,
 }
 
 impl Row {
+    pub fn new(post: impl Into<String>, name: impl Into<String>, total: Option<u64>) -> Self {
+        Row {
+            post: post.into(),
+            name: name.into(),
+            state: RowState::Queued,
+            done: 0,
+            total,
+            origin: JobOrigin::Pawchive,
+            renamed: false,
+            content_type: None,
+            real_name: None,
+        }
+    }
+
+    pub fn is_pawchive(&self) -> bool {
+        self.origin == JobOrigin::Pawchive
+    }
+
     pub fn percent(&self) -> Option<f32> {
         match self.total {
             Some(t) if t > 0 => Some((self.done as f32 / t as f32).clamp(0.0, 1.0)),
@@ -109,6 +139,10 @@ pub struct ScanFailure {
 pub struct Model {
     pub phase: Phase,
     pub creator: Option<CreatorRef>,
+    /// What the pasted link asked for: a whole creator, or one post (`post_id`).
+    pub scan_target: Option<ScanTarget>,
+    /// Set after a single-post scan.
+    pub scan_post: Option<PostRef>,
     pub posts: usize,
     pub scan_progress: ScanProgress,
     pub scan_started: Option<Instant>,
@@ -117,6 +151,16 @@ pub struct Model {
     pub files: Vec<FileEntry>,
     /// Bumped whenever `files` changes, so cached summaries know when to refresh.
     pub files_version: u64,
+    /// External links of the scan, with their check state and ticks.
+    pub links: Vec<LinkRow>,
+    pub links_posts: usize,
+    pub link_filter: LinkFilter,
+    /// `Checking links · done of total`, while the session checks links.
+    pub checking: Option<(usize, usize)>,
+    /// External hosts that asked us to slow down, and until when.
+    pub cooldowns: HashMap<ExtHost, Instant>,
+    /// Link row index (in `rows`) of each link file's job: `(link, child)` -> `rows` index.
+    pub link_jobs: HashMap<(usize, Option<usize>), usize>,
     pub sizing: Sizing,
     pub rows: Vec<Row>,
     pub run_started: Option<Instant>,
@@ -135,6 +179,8 @@ impl Default for Model {
         Model {
             phase: Phase::Empty,
             creator: None,
+            scan_target: None,
+            scan_post: None,
             posts: 0,
             scan_progress: ScanProgress::default(),
             scan_started: None,
@@ -142,6 +188,12 @@ impl Default for Model {
             scan_failure: None,
             files: Vec::new(),
             files_version: 0,
+            links: Vec::new(),
+            links_posts: 0,
+            link_filter: LinkFilter::All,
+            checking: None,
+            cooldowns: HashMap::new(),
+            link_jobs: HashMap::new(),
             sizing: Sizing::Finished { skipped: false },
             rows: Vec::new(),
             run_started: None,
@@ -172,6 +224,58 @@ impl Model {
 
     pub fn count(&self, pred: impl Fn(&RowState) -> bool) -> usize {
         self.rows.iter().filter(|r| pred(&r.state)).count()
+    }
+
+    /// Rows of the run that are Pawchive files (the Files tab and its chips).
+    pub fn pawchive_rows(&self) -> impl Iterator<Item = (usize, &Row)> {
+        self.rows.iter().enumerate().filter(|(_, r)| r.is_pawchive())
+    }
+
+    /// Selected link files in the run.
+    pub fn link_file_rows(&self) -> usize {
+        self.rows.iter().filter(|r| !r.is_pawchive()).count()
+    }
+
+    /// How a link's download went, for the export (`None` before a run, or when it was not picked).
+    pub fn link_outcome(&self, link: usize) -> Option<crate::links_state::RunOutcome> {
+        use crate::links_state::RunOutcome;
+        let mut any = false;
+        let (mut failed, mut quota, mut open) = (false, false, false);
+        for r in self.rows.iter().filter(|r| matches!(r.origin, JobOrigin::Link { link: l, .. } if l == link)) {
+            any = true;
+            match &r.state {
+                RowState::Done | RowState::Skipped => {}
+                RowState::Failed { error, .. } => {
+                    failed = true;
+                    quota |= error.starts_with("Download limit reached");
+                }
+                _ => open = true,
+            }
+        }
+        match (any, failed, open) {
+            (false, _, _) => None,
+            (_, true, _) => Some(RunOutcome::Failed { quota }),
+            (_, _, true) => Some(RunOutcome::Queued),
+            _ => Some(RunOutcome::Saved),
+        }
+    }
+
+    /// The run rows of a link: its one file, or (for a folder parent) every ticked child.
+    pub fn link_job_rows(&self, link: usize, child: Option<Option<usize>>) -> Vec<&Row> {
+        match child {
+            Some(c) => self.link_jobs.get(&(link, c)).and_then(|&i| self.rows.get(i)).into_iter().collect(),
+            None => self
+                .rows
+                .iter()
+                .filter(|r| matches!(r.origin, JobOrigin::Link { link: l, child: Some(_) } if l == link))
+                .collect(),
+        }
+    }
+
+    /// Seconds left of an external host's cool-down.
+    pub fn host_cooldown_secs(&self, host: ExtHost, now: Instant) -> Option<u64> {
+        let until = *self.cooldowns.get(&host)?;
+        (until > now).then(|| until.saturating_duration_since(now).as_secs_f64().ceil() as u64)
     }
 
     /// Files that are on disk: downloaded now or already there.
@@ -297,6 +401,7 @@ impl Model {
 
     /// Called every frame: ends the cool-down and keeps the speed window.
     pub fn tick(&mut self, now: Instant) {
+        self.cooldowns.retain(|_, until| *until > now);
         if self.slow_until.is_some_and(|u| u <= now) {
             self.slow_until = None;
             if self.phase == Phase::Downloading {
@@ -374,7 +479,16 @@ impl Model {
                 };
                 self.push_log(level, m);
             }
-            UiEvent::ScanStarted(c) => {
+            UiEvent::ScanStarted(target) => {
+                let c = target.creator.clone();
+                self.scan_target = Some(target);
+                self.scan_post = None;
+                self.links.clear();
+                self.links_posts = 0;
+                self.link_filter = LinkFilter::All;
+                self.checking = None;
+                self.cooldowns.clear();
+                self.link_jobs.clear();
                 self.phase = Phase::Scanning;
                 self.cancel_requested = false;
                 self.scan_failure = None;
@@ -395,16 +509,33 @@ impl Model {
                 self.scan_progress = p;
                 self.scan_last_progress = Some(now);
             }
-            UiEvent::ScanFinished { creator, posts, files } => {
+            UiEvent::ScanFinished { creator, posts, files, links: found, post } => {
+                let n_links = match found.len() {
+                    0 => String::new(),
+                    1 => ", 1 external link".to_string(),
+                    n => format!(", {n} external links"),
+                };
+                let n_files = if files.len() == 1 { "1 file".to_string() } else { format!("{} files", files.len()) };
                 self.push_log(
                     Level::Info,
-                    format!(
-                        "Scan finished: {posts} posts, {} files ({}/{})",
-                        files.len(),
-                        creator.service.as_str(),
-                        creator.id
-                    ),
+                    match &post {
+                        Some(p) => format!(
+                            "Scan finished: post {}, {n_files}{n_links} ({}/{})",
+                            p.id,
+                            creator.service.as_str(),
+                            creator.id
+                        ),
+                        None => format!(
+                            "Scan finished: {posts} posts, {} files{n_links} ({}/{})",
+                            files.len(),
+                            creator.service.as_str(),
+                            creator.id
+                        ),
+                    },
                 );
+                self.links_posts = links::posts_with_links(&found);
+                self.links = found.into_iter().map(LinkRow::new).collect();
+                self.scan_post = post;
                 let to_size = files.iter().filter(|f| !f.preview_only).count();
                 self.sizing = if to_size > 0 {
                     Sizing::Running { done: 0, total: to_size }
@@ -467,6 +598,43 @@ impl Model {
                     );
                 }
             }
+            UiEvent::LinkChecking { link } => {
+                if let Some(r) = self.links.get_mut(link) {
+                    r.check = Check::Checking;
+                }
+            }
+            UiEvent::LinkResolved { link, resolved } => {
+                if let Some(r) = self.links.get_mut(link) {
+                    r.resolve(resolved);
+                }
+            }
+            UiEvent::LinkDead { link, reason } => {
+                if let Some(r) = self.links.get_mut(link) {
+                    if let Some(h) = r.ext_host() {
+                        let text = reason.text(h);
+                        self.push_log(Level::Warn, format!("Dead link ({}): {text}", h.name()));
+                    }
+                }
+                if let Some(r) = self.links.get_mut(link) {
+                    r.kill(reason);
+                }
+            }
+            UiEvent::LinkCheckFailed { link, message } => {
+                if let Some(r) = self.links.get_mut(link) {
+                    r.check = match message {
+                        Some(m) => Check::Unavailable(m),
+                        None => Check::NotChecked,
+                    };
+                }
+            }
+            UiEvent::CheckProgress { done, total } => self.checking = Some((done, total)),
+            UiEvent::CheckFinished { skipped } => {
+                self.checking = None;
+                if skipped {
+                    self.push_log(Level::Info, "Link checking skipped by you");
+                }
+            }
+            UiEvent::HostCooldown { host, secs } => self.host_cooldown(host, secs, now),
             UiEvent::DownloadStarted { jobs } => {
                 self.phase = Phase::Downloading;
                 self.summary = None;
@@ -475,17 +643,21 @@ impl Model {
                 self.run_started = Some(now);
                 self.run_elapsed = None;
                 self.samples.clear();
+                self.checking = None;
+                self.link_jobs.clear();
                 self.rows = jobs
                     .into_iter()
-                    .map(|j| {
-                        let (post, name) = j.label.rsplit_once('/').unwrap_or(("", j.label.as_str()));
-                        Row {
-                            post: post.to_string(),
-                            name: name.to_string(),
-                            state: RowState::Queued,
-                            done: 0,
-                            total: j.expected_size,
+                    .enumerate()
+                    .map(|(i, j)| {
+                        // A link file's label is `post folder/path inside the link/leaf`; a Pawchive file's
+                        // is `post folder/leaf`.
+                        let linked = matches!(j.origin, JobOrigin::Link { .. });
+                        let split = if linked { j.label.split_once('/') } else { j.label.rsplit_once('/') };
+                        let (post, name) = split.unwrap_or(("", j.label.as_str()));
+                        if let JobOrigin::Link { link, child } = j.origin {
+                            self.link_jobs.insert((link, child), i);
                         }
+                        Row { origin: j.origin, renamed: j.renamed, ..Row::new(post, name, j.expected_size) }
                     })
                     .collect();
                 self.push_log(Level::Info, format!("Download started: {} files", self.rows.len()));
@@ -566,7 +738,25 @@ impl Model {
                 self.set_state(id, RowState::Failed { error, permanent });
             }
             Event::Cancelled { id } => self.set_state(id, RowState::Stopped),
+            Event::Meta { id, name, content_type } => {
+                if let Some(r) = self.rows.get_mut(id as usize) {
+                    r.real_name = name;
+                    r.content_type = content_type;
+                }
+            }
+            Event::ExtCooldown { host, secs } => self.host_cooldown(host, secs, now),
         }
+    }
+
+    fn host_cooldown(&mut self, host: ExtHost, secs: u64, now: Instant) {
+        if secs == 0 {
+            return;
+        }
+        self.cooldowns.insert(host, now + Duration::from_secs(secs));
+        self.push_log(
+            Level::Warn,
+            format!("{} asked us to slow down. Its requests pause for {secs} s; other sites carry on.", host.name()),
+        );
     }
 
     fn set_state(&mut self, id: u64, state: RowState) {
@@ -648,7 +838,13 @@ mod tests {
         m.apply(
             UiEvent::DownloadStarted {
                 jobs: (0..n)
-                    .map(|id| JobInfo { id, label: format!("post{id}/f{id}.jpg"), expected_size: Some(100) })
+                    .map(|id| JobInfo {
+                        id,
+                        label: format!("post{id}/f{id}.jpg"),
+                        expected_size: Some(100),
+                        origin: JobOrigin::Pawchive,
+                        renamed: false,
+                    })
                     .collect(),
             },
             now,
@@ -660,11 +856,15 @@ mod tests {
         CreatorRef { service: Service::Fanbox, id: "1".into() }
     }
 
+    fn target() -> ScanTarget {
+        ScanTarget { creator: creator(), post_id: None }
+    }
+
     #[test]
     fn scan_lifecycle_and_error_keeps_what_was_found() {
         let now = Instant::now();
         let mut m = Model::default();
-        m.apply(UiEvent::ScanStarted(creator()), now);
+        m.apply(UiEvent::ScanStarted(target()), now);
         assert_eq!(m.phase, Phase::Scanning);
         m.apply(UiEvent::ScanProgress(ScanProgress { pages: 13, posts: 650, files: 3000 }), now);
         m.apply(UiEvent::ScanFailed("request failed: operation timed out".into()), now);
@@ -675,8 +875,8 @@ mod tests {
             explain_scan_error(&f.message, m.posts),
             "Couldn't reach pawchive.pw (connection timed out). 650 posts were found before it stopped."
         );
-        m.apply(UiEvent::ScanStarted(creator()), now);
-        m.apply(UiEvent::ScanFinished { creator: creator(), posts: 3, files: vec![] }, now);
+        m.apply(UiEvent::ScanStarted(target()), now);
+        m.apply(UiEvent::ScanFinished { creator: creator(), posts: 3, files: vec![], links: vec![], post: None }, now);
         assert_eq!(m.phase, Phase::Ready);
     }
 
@@ -684,7 +884,7 @@ mod tests {
     fn cancelling_a_scan_returns_to_empty_without_an_error() {
         let now = Instant::now();
         let mut m = Model::default();
-        m.apply(UiEvent::ScanStarted(creator()), now);
+        m.apply(UiEvent::ScanStarted(target()), now);
         m.note_cancel();
         m.apply(UiEvent::ScanFailed("cancelled".into()), now);
         assert_eq!(m.phase, Phase::Empty);
@@ -695,7 +895,7 @@ mod tests {
     fn scan_stalls_after_ten_seconds_without_a_page() {
         let t0 = Instant::now();
         let mut m = Model::default();
-        m.apply(UiEvent::ScanStarted(creator()), t0);
+        m.apply(UiEvent::ScanStarted(target()), t0);
         assert!(!m.scan_stalled(t0 + Duration::from_secs(9)));
         assert!(m.scan_stalled(t0 + Duration::from_secs(10)));
         m.apply(UiEvent::ScanProgress(ScanProgress { pages: 1, posts: 50, files: 5 }), t0 + Duration::from_secs(10));
@@ -848,7 +1048,16 @@ mod tests {
             content_type: None,
             missing: false,
         };
-        m.apply(UiEvent::ScanFinished { creator: creator(), posts: 1, files: vec![f("a.jpg"), f("b.jpg")] }, now);
+        m.apply(
+            UiEvent::ScanFinished {
+                creator: creator(),
+                posts: 1,
+                files: vec![f("a.jpg"), f("b.jpg")],
+                links: vec![],
+                post: None,
+            },
+            now,
+        );
         assert_eq!(m.sizing, Sizing::Running { done: 0, total: 2 });
         let v = m.files_version;
         m.apply(UiEvent::FileSized { index: 1, size: Some(10), content_type: Some("image/jpeg".into()) }, now);
@@ -889,5 +1098,117 @@ mod tests {
         );
         assert!(explain_scan_error("could not parse response: x", 0)
             .starts_with("Pawchive returned something we couldn't read."));
+    }
+
+    // ---- external links -----------------------------------------------------------------------------
+
+    fn link_of(id: usize, kind: pawchive_core::links::LinkKind) -> pawchive_core::links::Link {
+        pawchive_core::links::Link {
+            id,
+            url: format!("https://x.test/{id}"),
+            host: pawchive_core::links::Host::Mediafire,
+            kind,
+            name_hint: None,
+            posts: vec![PostRef { id: "9".into(), title: "T".into(), published: None }],
+        }
+    }
+
+    #[test]
+    fn a_post_scan_remembers_its_target_and_link_checks_update_the_rows() {
+        use pawchive_core::external::{DeadReason, Resolved, ResolvedKind};
+        use pawchive_core::links::LinkKind;
+        let now = Instant::now();
+        let mut m = Model::default();
+        let target = ScanTarget { creator: creator(), post_id: Some("9".into()) };
+        m.apply(UiEvent::ScanStarted(target), now);
+        let kind = LinkKind::MediafireFile { key: "k".into(), page_url: "p".into() };
+        let post = PostRef { id: "9".into(), title: "T".into(), published: None };
+        m.apply(
+            UiEvent::ScanFinished {
+                creator: creator(),
+                posts: 1,
+                files: vec![],
+                links: vec![link_of(0, kind.clone()), link_of(1, kind)],
+                post: Some(post),
+            },
+            now,
+        );
+        assert_eq!((m.links.len(), m.links_posts, m.phase), (2, 1, Phase::Ready));
+        assert!(m.scan_post.is_some() && m.scan_target.as_ref().unwrap().post_id.as_deref() == Some("9"));
+        assert_eq!(m.log.back().unwrap().text, "Scan finished: post 9, 0 files, 2 external links (fanbox/1)");
+        m.apply(UiEvent::LinkChecking { link: 0 }, now);
+        assert_eq!(m.links[0].check, Check::Checking);
+        m.apply(UiEvent::CheckProgress { done: 0, total: 2 }, now);
+        assert_eq!(m.checking, Some((0, 2)));
+        let res = Resolved { name: "a.rar".into(), size: Some(5), content_type: None, kind: ResolvedKind::File };
+        m.apply(UiEvent::LinkResolved { link: 0, resolved: res }, now);
+        m.apply(UiEvent::LinkDead { link: 1, reason: DeadReason::Removed }, now);
+        assert!(m.links[0].resolved().is_some() && matches!(m.links[1].check, Check::Dead(DeadReason::Removed)));
+        m.apply(UiEvent::LinkCheckFailed { link: 0, message: None }, now);
+        assert_eq!(m.links[0].check, Check::NotChecked, "skipped: back to unchecked, no note");
+        m.apply(UiEvent::CheckFinished { skipped: false }, now);
+        assert_eq!(m.checking, None);
+        // A new scan clears the links and the filter.
+        m.link_filter = LinkFilter::Drive;
+        m.apply(UiEvent::ScanStarted(ScanTarget { creator: creator(), post_id: None }), now);
+        assert!(m.links.is_empty() && m.link_filter == LinkFilter::All && m.scan_post.is_none());
+    }
+
+    #[test]
+    fn link_files_are_rows_of_the_run_but_not_pawchive_rows_and_hosts_cool_down_alone() {
+        let now = Instant::now();
+        let mut m = Model::default();
+        let info = |id: u64, label: &str, origin| pawchive_core::session::JobInfo {
+            id,
+            label: label.into(),
+            expected_size: Some(10),
+            origin,
+            renamed: false,
+        };
+        m.apply(
+            UiEvent::DownloadStarted {
+                jobs: vec![
+                    info(0, "post/1.jpg", JobOrigin::Pawchive),
+                    info(1, "post/Folder/Lineart/1.jpg", JobOrigin::Link { link: 0, child: Some(2) }),
+                    info(2, "post/Super Girl.rar", JobOrigin::Link { link: 1, child: None }),
+                ],
+            },
+            now,
+        );
+        assert_eq!(m.rows.len(), 3);
+        assert_eq!((m.pawchive_rows().count(), m.link_file_rows()), (1, 2), "the Files tab never lists link files");
+        assert_eq!((m.rows[1].post.as_str(), m.rows[1].name.as_str()), ("post", "Folder/Lineart/1.jpg"));
+        assert_eq!(m.link_jobs[&(0, Some(2))], 1);
+        assert_eq!(m.link_jobs[&(1, None)], 2);
+        assert_eq!(m.link_job_rows(0, None).len(), 1, "a folder parent sees its children's jobs");
+        // What the server said decides the type, never the link text.
+        m.apply(
+            UiEvent::Download(Event::Meta {
+                id: 2,
+                name: Some("Super Girl.rar".into()),
+                content_type: Some("application/x-rar".into()),
+            }),
+            now,
+        );
+        assert_eq!(m.rows[2].content_type.as_deref(), Some("application/x-rar"));
+        assert_eq!(m.link_outcome(1), Some(crate::links_state::RunOutcome::Queued));
+        m.apply(UiEvent::Download(Event::Done { id: 2, bytes: 10 }), now);
+        assert_eq!(m.link_outcome(1), Some(crate::links_state::RunOutcome::Saved));
+        m.apply(
+            UiEvent::Download(Event::Failed {
+                id: 1,
+                error: "Download limit reached on Google Drive. Try again later.".into(),
+                permanent: false,
+            }),
+            now,
+        );
+        assert_eq!(m.link_outcome(0), Some(crate::links_state::RunOutcome::Failed { quota: true }));
+        // Only the throttled host cools down; Pawchive's own pause is untouched.
+        m.apply(UiEvent::Download(Event::ExtCooldown { host: ExtHost::Drive, secs: 60 }), now);
+        assert_eq!(m.host_cooldown_secs(ExtHost::Drive, now), Some(60));
+        assert_eq!(m.host_cooldown_secs(ExtHost::Mediafire, now), None);
+        assert_eq!(m.slow_secs(now), None, "the global cool-down is Pawchive-only");
+        m.tick(now + Duration::from_secs(61));
+        assert_eq!(m.host_cooldown_secs(ExtHost::Drive, now + Duration::from_secs(61)), None);
     }
 }

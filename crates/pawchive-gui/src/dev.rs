@@ -36,6 +36,27 @@ pub fn autodownload_dir() -> Option<String> {
     debug_env("PAWCHIVE_DEV_AUTODOWNLOAD")
 }
 
+/// Show the External links tab as soon as a scan finishes. Debug builds only.
+pub fn open_links_tab() -> bool {
+    debug_env("PAWCHIVE_DEV_LINKS_TAB").is_some()
+}
+
+/// Tick links as soon as a scan finishes: `1` for every downloadable link, or a host name (`mediafire`).
+/// Debug builds only.
+pub fn tick_links() -> Option<String> {
+    debug_env("PAWCHIVE_DEV_TICK_LINKS")
+}
+
+/// Ask the session to check every downloadable link as soon as a scan finishes. Debug builds only.
+pub fn check_links() -> bool {
+    debug_env("PAWCHIVE_DEV_CHECK_LINKS").is_some()
+}
+
+/// Write both export files here instead of opening a save dialog (headless runs have no portal). Debug builds only.
+pub fn export_dir() -> Option<String> {
+    debug_env("PAWCHIVE_DEV_EXPORT_DIR")
+}
+
 /// Open the settings window at startup. Debug builds only.
 pub fn open_settings() -> bool {
     debug_env("PAWCHIVE_DEV_OPEN_SETTINGS").is_some()

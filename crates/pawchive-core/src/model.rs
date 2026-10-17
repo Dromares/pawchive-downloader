@@ -51,6 +51,13 @@ where
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
+/// An `embed` that is not an object (never seen, but the API is not ours) is read as absent
+/// instead of failing the whole page.
+fn lenient_embed<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Option<RawEmbed>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
+}
+
 /// `file` / `attachments[]` entry. Every field is optional: a post with no main file carries `{}`,
 /// fanbox entries have no `preview_only`, and only some zip attachments have `node`.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -79,6 +86,21 @@ pub struct Post {
     pub file: Option<RawFile>,
     #[serde(default, deserialize_with = "null_as_default")]
     pub attachments: Vec<RawFile>,
+    /// HTML (patreon) or text body. Links to other sites live here (DAN-1609).
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub content: String,
+    /// `{}` on most posts; an embedded link has `url`, `subject` and `description`.
+    #[serde(default, deserialize_with = "lenient_embed")]
+    pub embed: Option<RawEmbed>,
+}
+
+/// The `embed` object of a post. Every field is optional (`{}` is the common case).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RawEmbed {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub url: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub description: String,
 }
 
 /// A file to (possibly) download, flattened out of a post.

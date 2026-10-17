@@ -3,6 +3,48 @@
 All notable changes to Pawchive Downloader are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-10-17
+
+### Added
+
+- **External links (DAN-1609).** Links in a post's text are found (`<a href>`, bare URLs, the `embed` field)
+  and listed in a new **External links** tab and a row in step 2. One row per unique link, with the host
+  (Google Drive, Mediafire, Mega, Dropbox, or the bare domain), the file name once known, the source post
+  and a checkbox. Nothing is ticked by default. Unsupported hosts are shown as *Not downloadable* with a
+  disabled box and are still exported.
+- **Google Drive and Mediafire downloads.** Mediafire: the file page is read at download time and its signed
+  link used at once (never stored). Drive: single files, the "can't scan for viruses" confirmation page
+  (every hidden form field is submitted), and public folders, with sub-folders kept on disk. A listing that
+  Drive might have cut short (50 or more entries on a page, or more than 1,000 files) is marked
+  *At least n files* and exported with `note = listing_incomplete`.
+- **Check links** reads a link's real name, size and liveness on demand, one request at a time per host;
+  a dead link (removed, private, password, empty folder) is shown as such and never counted.
+- **Export list** saves every found link as `.txt` (one URL per line) or `.csv` (host, url, filename, size,
+  status, source post, note).
+- **Link files are sorted by what the server says**: the real file name (`Content-Disposition`) and
+  Content-Type, never the link text.
+- **A post link scans only that post.** `…/user/{id}/post/{post}` makes one request; a creator link scans
+  every post, as before. The app says which one it understood.
+- **Per-host rate limits.** Google Drive and Mediafire each have their own request clock (the pause applies
+  to each separately), at most one active download each, and their own 60 s cool-down on a 403/429; Pawchive
+  downloads carry on.
+- **Keyboard:** the link list is one Tab stop with arrow-key navigation (Space, Enter, Home/End, PageUp/PageDown,
+  Right/Left to open and close a folder, Ctrl+A).
+
+### Changed
+
+- **Privacy:** the cookie file and the contact string are sent to pawchive.pw only. Google Drive and Mediafire
+  get a plain `pawchive-downloader/<version>` user agent and no cookies.
+- `1 file selected` (the old text said `1 files`).
+
+### Known limitations
+
+- **Drive folder pagination is not verified.** No public folder with more than 9 entries was available to
+  measure; the 50-entry threshold is the page limit documented by gdown, not something measured here.
+- Mediafire folders, Google Docs/Sheets and non-public Drive files are not supported.
+- A link that turns out dead while a download is starting is shown as dead in the External links tab but
+  is not listed in Problems.
+
 ## [0.1.1] - 2026-10-16
 
 ### Fixed

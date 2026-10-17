@@ -63,6 +63,15 @@ pub fn selection(summary: &FileSummary, checked: &HashSet<Category>, include_pre
     s
 }
 
+/// Add the ticked link files to a Pawchive selection: each file counts once, known sizes add up, and
+/// any unknown size makes the whole byte total a lower bound (`≥`) while the file count stays exact.
+pub fn with_links(mut sel: Sel, t: &crate::links_state::Totals) -> Sel {
+    sel.files += t.selected;
+    sel.bytes += t.selected_bytes;
+    sel.partial |= t.selected_unknown;
+    sel
+}
+
 /// Every file the scan found answered 404 when sized: nothing but (maybe) thumbnails can be saved.
 pub fn all_gone(s: &FileSummary) -> bool {
     s.missing > 0 && s.per_category.is_empty() && s.preview.count == s.preview_missing
@@ -253,7 +262,7 @@ mod tests {
         let mut m = Model::default();
         let creator = CreatorRef { service: Service::Fanbox, id: "1386751".into() };
         let files = names.iter().map(|n| entry(n)).collect();
-        m.apply(UiEvent::ScanFinished { creator, posts: 1, files }, Instant::now());
+        m.apply(UiEvent::ScanFinished { creator, posts: 1, files, links: vec![], post: None }, Instant::now());
         m
     }
 
@@ -338,7 +347,15 @@ mod tests {
         assert_eq!(window_title(&m, now), "Pawchive Downloader");
         m.apply(
             UiEvent::DownloadStarted {
-                jobs: (0..4).map(|id| JobInfo { id, label: format!("p/f{id}"), expected_size: Some(100) }).collect(),
+                jobs: (0..4)
+                    .map(|id| JobInfo {
+                        id,
+                        label: format!("p/f{id}"),
+                        expected_size: Some(100),
+                        origin: pawchive_core::plan::JobOrigin::Pawchive,
+                        renamed: false,
+                    })
+                    .collect(),
             },
             now,
         );

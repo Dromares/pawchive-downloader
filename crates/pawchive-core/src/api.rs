@@ -7,7 +7,8 @@ use crate::creator::CreatorRef;
 use crate::error::{Error, Result};
 use crate::gate::Gate;
 use crate::http::{send_with_retry, Http, RetryPolicy};
-use crate::model::{parse_posts, FileEntry};
+use crate::links::{self, Link, PostRef};
+use crate::model::{parse_post, parse_posts, FileEntry, Post};
 
 /// Posts per page (`?o=` advances by this much).
 pub const PAGE_SIZE: usize = 50;
@@ -19,6 +20,9 @@ pub struct Hosts {
     pub api: String,
     pub file: String,
     pub thumb: String,
+    /// Tests and the dev harness only: send every request to Google Drive and Mediafire to this
+    /// base URL instead (scheme and host replaced, path and query kept).
+    pub external: Option<String>,
 }
 
 impl Default for Hosts {
@@ -27,6 +31,7 @@ impl Default for Hosts {
             api: "https://pawchive.pw".into(),
             file: "https://file.pawchive.pw".into(),
             thumb: "https://img.pawchive.pw".into(),
+            external: None,
         }
     }
 }
@@ -35,6 +40,27 @@ impl Hosts {
     /// `GET {api}/api/v1/{service}/user/{id}?o={offset}`
     pub fn page_url(&self, c: &CreatorRef, offset: usize) -> String {
         format!("{}/api/v1/{}/user/{}?o={offset}", self.api, c.service.as_str(), c.id)
+    }
+
+    /// `GET {api}/api/v1/{service}/user/{id}/post/{post_id}`: one post, flat object.
+    pub fn post_url(&self, c: &CreatorRef, post_id: &str) -> String {
+        format!("{}/api/v1/{}/user/{}/post/{post_id}", self.api, c.service.as_str(), c.id)
+    }
+
+    /// The URL to really request for an external `url`: unchanged, or re-based on `external`.
+    pub fn external_url(&self, url: &str) -> String {
+        let Some(base) = &self.external else { return url.to_string() };
+        match url::Url::parse(url) {
+            Ok(u) => {
+                let mut out = format!("{}{}", base.trim_end_matches('/'), u.path());
+                if let Some(q) = u.query() {
+                    out.push('?');
+                    out.push_str(q);
+                }
+                out
+            }
+            Err(_) => url.to_string(),
+        }
     }
 
     /// Full-size file: `{file}/data{path}`
@@ -69,6 +95,10 @@ pub struct ScanResult {
     pub pages: usize,
     pub posts: usize,
     pub files: Vec<FileEntry>,
+    /// External links found in the posts' text, de-duplicated, in display order.
+    pub links: Vec<Link>,
+    /// Set for a single-post scan.
+    pub post: Option<PostRef>,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +118,7 @@ impl Client {
         mut on_progress: impl FnMut(ScanProgress),
     ) -> Result<ScanResult> {
         let mut files = Vec::new();
+        let mut all_posts: Vec<Post> = Vec::new();
         let mut progress = ScanProgress::default();
         let mut prev_first: Option<String> = None;
         for page_no in 0..MAX_PAGES {
@@ -105,6 +136,8 @@ impl Client {
                     pages: progress.pages,
                     posts: progress.posts,
                     files,
+                    links: links::collect(&all_posts),
+                    post: None,
                 });
             }
             // A server that ignores `o` would hand us the same page forever.
@@ -117,10 +150,32 @@ impl Client {
             for p in &posts {
                 files.extend(p.files());
             }
+            all_posts.extend(posts);
             progress.files = files.len();
             on_progress(progress);
         }
         Err(Error::Parse(format!("gave up after {MAX_PAGES} pages")))
+    }
+
+    /// One request for a single post (`/post/{id}` links): its files and the links in its text.
+    pub async fn scan_post(&self, creator: &CreatorRef, post_id: &str, control: &Control) -> Result<ScanResult> {
+        let url = self.hosts.post_url(creator, post_id);
+        let resp = send_with_retry(&self.gate, control, &self.policy, || {
+            self.http.get(&url).header(reqwest::header::ACCEPT, "application/json")
+        })
+        .await?;
+        let body = resp.bytes().await.map_err(Error::from_reqwest)?;
+        let post = parse_post(&body)?;
+        let files = post.files();
+        let pref = PostRef { id: post.id.clone(), title: post.title.clone(), published: post.published.clone() };
+        Ok(ScanResult {
+            creator: creator.clone(),
+            pages: 1,
+            posts: 1,
+            links: links::collect(std::slice::from_ref(&post)),
+            files,
+            post: Some(pref),
+        })
     }
 }
 
@@ -137,5 +192,9 @@ mod tests {
         assert_eq!(h.full_url("/4d/e5/x.jpg"), "https://file.pawchive.pw/data/4d/e5/x.jpg");
         assert_eq!(h.thumb_url("/4d/e5/x.jpg"), "https://img.pawchive.pw/thumbnail/data/4d/e5/x.jpg");
         assert_eq!(h.full_url("4d/x"), "https://file.pawchive.pw/data/4d/x");
+        assert_eq!(h.post_url(&c, "172435214"), "https://pawchive.pw/api/v1/patreon/user/30500811/post/172435214");
+        assert_eq!(h.external_url("https://drive.google.com/uc?id=1&x=2"), "https://drive.google.com/uc?id=1&x=2");
+        let t = Hosts { external: Some("http://127.0.0.1:9/".into()), ..Hosts::default() };
+        assert_eq!(t.external_url("https://drive.google.com/uc?id=1&x=2#f"), "http://127.0.0.1:9/uc?id=1&x=2");
     }
 }
