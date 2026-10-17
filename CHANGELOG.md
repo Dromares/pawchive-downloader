@@ -5,6 +5,13 @@ All notable changes to Pawchive Downloader are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- After an Update that finds nothing, a partly downloaded profile no longer says `0 new files` beside a
+  bottom bar offering `Download new only (n)`: the card now reads `No new files in this update. n files not
+  downloaded yet, m already downloaded.` The bar also says `size not measured` instead of `≥ 0 B` when no
+  file to fetch has a measured size.
+
 ## [0.3.0] - 2026-10-17
 
 ### Added
