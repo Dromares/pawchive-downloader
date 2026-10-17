@@ -157,6 +157,8 @@ pub struct Model {
     pub link_filter: LinkFilter,
     /// `Checking links · done of total`, while the session checks links.
     pub checking: Option<(usize, usize)>,
+    /// Download was pressed and is waiting for the picked links to be checked first.
+    pub awaiting_checks: bool,
     /// External hosts that asked us to slow down, and until when.
     pub cooldowns: HashMap<ExtHost, Instant>,
     /// Link row index (in `rows`) of each link file's job: `(link, child)` -> `rows` index.
@@ -192,6 +194,7 @@ impl Default for Model {
             links_posts: 0,
             link_filter: LinkFilter::All,
             checking: None,
+            awaiting_checks: false,
             cooldowns: HashMap::new(),
             link_jobs: HashMap::new(),
             sizing: Sizing::Finished { skipped: false },
@@ -487,6 +490,7 @@ impl Model {
                 self.links_posts = 0;
                 self.link_filter = LinkFilter::All;
                 self.checking = None;
+                self.awaiting_checks = false;
                 self.cooldowns.clear();
                 self.link_jobs.clear();
                 self.phase = Phase::Scanning;
@@ -635,7 +639,12 @@ impl Model {
                 }
             }
             UiEvent::HostCooldown { host, secs } => self.host_cooldown(host, secs, now),
+            UiEvent::DownloadWaiting => {
+                self.awaiting_checks = true;
+                self.push_log(Level::Info, "Checking the picked links before the download starts");
+            }
             UiEvent::DownloadStarted { jobs } => {
+                self.awaiting_checks = false;
                 self.phase = Phase::Downloading;
                 self.summary = None;
                 self.cancel_requested = false;
@@ -664,6 +673,11 @@ impl Model {
             }
             UiEvent::Download(e) => self.apply_download(e, now),
             UiEvent::DownloadFinished(s) => {
+                if std::mem::take(&mut self.awaiting_checks) {
+                    // The wait ended without a download (cancelled, or nothing left to fetch): the phase
+                    // (Ready, or Cancelled after an earlier run) and that run's rows stay as they were.
+                    return;
+                }
                 if self.rows.is_empty() {
                     // Nothing was queued; stay on the results.
                     self.phase = Phase::Ready;

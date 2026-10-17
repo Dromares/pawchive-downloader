@@ -130,6 +130,9 @@ pub enum UiEvent {
         host: ExtHost,
         secs: u64,
     },
+    /// Download was pressed while picked links still had to be checked; `DownloadStarted` (or
+    /// `DownloadFinished` if nothing starts) follows once the checks end.
+    DownloadWaiting,
     DownloadStarted {
         jobs: Vec<JobInfo>,
     },
@@ -581,7 +584,7 @@ impl Session {
     }
 
     fn pump_checks(&mut self) {
-        let Some(ext) = self.ext.clone() else { return };
+        let Some(ext) = self.ext.as_ref().map(ExtClient::for_checks) else { return };
         for host in [ExtHost::Drive, ExtHost::Mediafire] {
             if self.check_running.contains(&host) {
                 continue;
@@ -703,6 +706,7 @@ impl Session {
         // next time: a download should not sit behind a long "Check links" run.
         self.drain_check_queue();
         self.pending = Some(pending);
+        self.emit(UiEvent::DownloadWaiting);
         self.check_links(missing, true);
         if self.check_running.is_empty() && self.check_queue.values().all(VecDeque::is_empty) {
             self.checks_idle();
@@ -711,7 +715,15 @@ impl Session {
 
     fn finish_start_download(&mut self, p: PendingDownload) {
         let Some(creator) = self.creator.clone() else { return };
+        let asked = p.picks.len();
         let picks: Vec<LinkPick> = p.picks.into_iter().filter(|k| self.resolved.contains_key(&k.link)).collect();
+        if picks.len() < asked {
+            let n = asked - picks.len();
+            let (s, were) = if n == 1 { ("", "was") } else { ("s", "were") };
+            self.log(format!(
+                "{n} picked link{s} could not be checked (or {were} dead) and {were} left out of this download"
+            ));
+        }
         let plan = plan_all(
             &creator,
             &self.files,

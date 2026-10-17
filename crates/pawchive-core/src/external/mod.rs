@@ -211,7 +211,19 @@ pub struct ExtClient {
     pub policy: RetryPolicy,
 }
 
+/// Requests per check, first one included. A check is a background convenience, so a throttled
+/// host gets one retry after its cool-down, then the row goes back to "Couldn't check". Downloads
+/// keep the full `RetryPolicy`.
+pub const CHECK_MAX_TRIES: u32 = 2;
+
 impl ExtClient {
+    /// The same client and clocks with the retry budget of a check.
+    pub fn for_checks(&self) -> ExtClient {
+        let mut c = self.clone();
+        c.policy.max_tries = c.policy.max_tries.min(CHECK_MAX_TRIES);
+        c
+    }
+
     pub fn new(hosts: Hosts, interval: Duration, policy: RetryPolicy) -> crate::Result<Self> {
         Ok(ExtClient { http: Http::external()?, gates: HostGates::new(interval), hosts, policy })
     }
