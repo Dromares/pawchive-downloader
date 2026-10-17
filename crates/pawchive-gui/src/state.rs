@@ -672,6 +672,15 @@ impl Model {
                 self.push_log(Level::Info, format!("Download started: {} files", self.rows.len()));
             }
             UiEvent::Download(e) => self.apply_download(e, now),
+            // The saved library arrives in the next commit.
+            UiEvent::Profiles(_)
+            | UiEvent::UpdateStarted { .. }
+            | UiEvent::UpdateStep(_)
+            | UiEvent::UpdateFailed { .. }
+            | UiEvent::UpdateCancelled
+            | UiEvent::ProfileLoaded(_)
+            | UiEvent::ProfileRemoved { .. }
+            | UiEvent::FileMarks(_) => {}
             UiEvent::DownloadFinished(s) => {
                 if std::mem::take(&mut self.awaiting_checks) {
                     // The wait ended without a download (cancelled, or nothing left to fetch): the phase
