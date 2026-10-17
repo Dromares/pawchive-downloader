@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Frame, Key, KeyboardShortcut, Margin, Modifiers};
 use pawchive_core::api::Hosts;
 use pawchive_core::classify::{Category, CustomExts};
+use pawchive_core::creator::CreatorRef;
 use pawchive_core::export;
 use pawchive_core::model::FileEntry;
 use pawchive_core::names::{creator_dir, post_dir};
-use pawchive_core::plan::{missing_with_thumbnail, plan_downloads, summarize, FileSummary, Selection};
+use pawchive_core::plan::{category_of, missing_with_thumbnail, plan_all, summarize, FileSummary, Selection};
 use pawchive_core::session::{Command, SessionHandle, UiEvent};
 use pawchive_core::settings::Settings;
 
@@ -26,9 +27,22 @@ use crate::theme::{self, Pal, LEFT_W, S4};
 /// is the one place that turns them into model changes and session commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    /// Scan, or Update when the link is a saved profile.
     Scan,
     CancelScan,
     Download,
+    /// Fetch only the files the library has not downloaded.
+    DownloadNew,
+    /// Read the whole post list of the open saved profile again.
+    FullRescan,
+    /// Open the n-th saved profile of the list.
+    OpenSaved(usize),
+    /// Ask before removing the n-th saved profile.
+    AskRemove(usize),
+    ConfirmRemove,
+    KeepProfile,
+    /// Back to the saved-profiles list.
+    BackToList,
     Pause,
     Resume,
     Cancel,
@@ -67,6 +81,7 @@ impl ExportFormat {
 pub enum Tab {
     Files,
     Links,
+    Posts,
     Problems,
     Log,
 }
@@ -96,6 +111,9 @@ pub struct ReadyRow {
     pub size: Option<u64>,
     /// The server answered 404 for this file when it was sized: listed, but it will not be saved.
     pub missing: bool,
+    /// The library has it as downloaded (saved profiles only), and where.
+    pub downloaded: bool,
+    pub saved_path: Option<PathBuf>,
 }
 
 pub struct App {
@@ -135,6 +153,11 @@ pub struct App {
     /// Row (in the visible list) with the keyboard ring, and the list's last scroll offset and height.
     pub(crate) link_focus: usize,
     pub(crate) link_view: (f32, f32),
+    /// The saved profile whose row shows "Remove from your list?".
+    pub(crate) remove_confirm: Option<CreatorRef>,
+    /// Keep (the safe button) has taken the focus for the confirm row now showing.
+    pub(crate) confirm_focused: bool,
+    new_cache: Option<(String, Sel)>,
     started: Instant,
     shot_done: bool,
     last_title: String,
@@ -190,6 +213,9 @@ impl App {
             link_notice: None,
             link_focus: 0,
             link_view: (0.0, 0.0),
+            remove_confirm: None,
+            confirm_focused: false,
+            new_cache: None,
             started: Instant::now(),
             shot_done: false,
             last_title: String::new(),
@@ -246,20 +272,39 @@ impl App {
             Some(creator) => {
                 let sel =
                     Selection { categories: derive::wanted(&self.checked), include_preview: self.include_preview };
-                let mut rows: Vec<ReadyRow> = plan_downloads(
+                let marks = self.model.saved.as_ref().map(|s| &s.marks);
+                let mut rows: Vec<ReadyRow> = plan_all(
                     creator,
                     &self.model.files,
                     &sel,
                     &CustomExts::parse(&self.custom_ext),
                     Path::new(""),
                     &Hosts::default(),
+                    None,
                 )
                 .into_iter()
-                .map(|j| {
-                    let (post, name) = j.label.rsplit_once('/').unwrap_or(("", j.label.as_str()));
-                    ReadyRow { post: post.to_string(), name: name.to_string(), size: j.expected_size, missing: false }
+                .map(|x| {
+                    let mark = x.file.and_then(|i| marks.and_then(|m| m.get(i)));
+                    let (post, name) = x.job.label.rsplit_once('/').unwrap_or(("", x.job.label.as_str()));
+                    let downloaded = mark.is_some_and(|m| m.downloaded);
+                    let saved_path = mark.and_then(|m| m.saved_path.clone());
+                    // A saved file is shown under the name it has on disk.
+                    let name = match (&saved_path, downloaded) {
+                        (Some(p), true) => p.file_name().map_or(name.to_string(), |n| n.to_string_lossy().into_owned()),
+                        _ => name.to_string(),
+                    };
+                    ReadyRow {
+                        post: post.to_string(),
+                        name,
+                        size: x.job.expected_size,
+                        missing: false,
+                        downloaded,
+                        saved_path,
+                    }
                 })
                 .collect();
+                // Files to fetch first, then the ones already saved (a stable sort keeps the site's order).
+                rows.sort_by_key(|r| r.downloaded);
                 // Gone files stay visible, marked, after the ones that will be saved. A missing image
                 // whose thumbnail is ticked is already above, as a `.thumb` job.
                 let thumb_saved = |f: &FileEntry| self.include_preview && missing_with_thumbnail(f);
@@ -268,6 +313,8 @@ impl App {
                     name: f.name.clone(),
                     size: None,
                     missing: true,
+                    downloaded: false,
+                    saved_path: None,
                 }));
                 rows
             }
@@ -276,6 +323,62 @@ impl App {
         let rows = Arc::new(rows);
         self.ready_cache = Some((key, rows.clone()));
         rows
+    }
+
+    /// What "Download new only" would fetch among the ticked types: the files the library has not
+    /// downloaded (`pending`). Thumbnails and external links are not part of it.
+    pub(crate) fn new_only(&mut self) -> Sel {
+        let mut cats: Vec<_> = self.checked.iter().copied().collect();
+        cats.sort();
+        let key = format!("{}|{}|{cats:?}", self.model.files_version, self.custom_ext);
+        if let Some((k, s)) = &self.new_cache {
+            if *k == key {
+                return *s;
+            }
+        }
+        let mut sel = Sel::default();
+        if let Some(saved) = &self.model.saved {
+            let wanted = derive::wanted(&self.checked);
+            let custom = CustomExts::parse(&self.custom_ext);
+            for (f, m) in self.model.files.iter().zip(&saved.marks) {
+                if m.pending && !f.missing && wanted.contains(&category_of(f, &custom)) {
+                    sel.files += 1;
+                    match f.size {
+                        Some(b) => sel.bytes += b,
+                        None => sel.unsized_files += 1,
+                    }
+                }
+            }
+            sel.partial = sel.unsized_files > 0;
+        }
+        self.new_cache = Some((key, sel));
+        sel
+    }
+
+    /// The URL button says `Update` when the link is a saved profile (or one is open and the field
+    /// is not a creator link), else `Scan`.
+    pub(crate) fn updating_link(&self) -> bool {
+        if !self.model.library_on() {
+            return false;
+        }
+        match crate::urlcheck::check(&self.url) {
+            Ok(t) => t.post_id.is_none() && self.model.is_saved(&t.creator),
+            Err(_) => self.model.saved.is_some(),
+        }
+    }
+
+    /// The saved profile the link in the field names, if any.
+    pub(crate) fn typed_saved(&self) -> Option<&pawchive_core::library::ProfileRecord> {
+        let t = crate::urlcheck::check(&self.url).ok()?;
+        if t.post_id.is_some() {
+            return None;
+        }
+        self.model.record_of(&t.creator)
+    }
+
+    /// `https://pawchive.pw/{service}/user/{id}` of a creator.
+    fn creator_url(c: &CreatorRef) -> String {
+        format!("https://pawchive.pw/{}/user/{}", c.service.as_str(), c.id)
     }
 
     pub(crate) fn has_folder(&self) -> bool {
@@ -301,9 +404,12 @@ impl App {
         match self.model.phase {
             Phase::Ready => {
                 let sel = self.selection();
-                derive::download_block(self.has_folder(), sel.files, self.all_gone())
-                    .is_none()
-                    .then_some(Action::Download)
+                let free = derive::download_block(self.has_folder(), sel.files, self.all_gone()).is_none();
+                if self.model.saved.as_ref().is_some_and(|s| s.has_history()) {
+                    // The primary button is "Download new only"; it is off when there is nothing new.
+                    return (free && self.new_only().files > 0).then_some(Action::DownloadNew);
+                }
+                free.then_some(Action::Download)
             }
             Phase::Downloading => Some(Action::Pause),
             Phase::Paused => Some(Action::Resume),
@@ -319,8 +425,16 @@ impl App {
     fn drain(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         while let Ok(ev) = self.rx.try_recv() {
-            let scan_done = matches!(ev, UiEvent::ScanFinished { .. });
+            let scan_done = match &ev {
+                UiEvent::ScanFinished { .. } => true,
+                UiEvent::ProfileLoaded(p) => !matches!(p.how, pawchive_core::session::Loaded::Updated(_)),
+                _ => false,
+            };
+            let removed = matches!(ev, UiEvent::ProfileRemoved { .. });
             self.model.apply(ev, now);
+            if removed {
+                self.remove_confirm = None;
+            }
             if scan_done {
                 self.tab = if dev::open_links_tab() { Tab::Links } else { Tab::Files };
                 self.filter = Filter::All;
@@ -443,9 +557,65 @@ impl App {
                     Err(e) => self.url_error = Some(e),
                 }
             }
+            Action::FullRescan => {
+                // Only for the saved profile that is open, and never while something runs.
+                if !self.url_editable() || self.model.saved.is_none() {
+                    return;
+                }
+                if let Some(c) = self.model.creator.clone() {
+                    self.url_error = None;
+                    self.handle.send(Command::FullRescan { url: Self::creator_url(&c) });
+                }
+            }
+            Action::OpenSaved(i) => {
+                if self.model.phase != Phase::Empty {
+                    return;
+                }
+                if let Some(c) = self.model.profiles().get(i).map(|p| p.creator.clone()) {
+                    self.url = Self::creator_url(&c);
+                    self.url_error = None;
+                    self.remove_confirm = None;
+                    self.handle.send(Command::OpenProfile(c));
+                }
+            }
+            Action::AskRemove(i) => {
+                self.remove_confirm = self.model.profiles().get(i).map(|p| p.creator.clone());
+                self.confirm_focused = false;
+            }
+            Action::KeepProfile => self.remove_confirm = None,
+            Action::ConfirmRemove => {
+                if let Some(c) = self.remove_confirm.take() {
+                    self.handle.send(Command::RemoveProfile(c));
+                }
+            }
+            Action::BackToList => {
+                if self.model.phase.busy() || !self.model.library_on() {
+                    return;
+                }
+                self.model.close_profile();
+                self.model.removed_note = None;
+                self.remove_confirm = None;
+                self.url_error = None;
+            }
             Action::CancelScan | Action::Cancel => {
                 self.model.note_cancel();
                 self.handle.send(Command::Cancel);
+            }
+            Action::DownloadNew => {
+                if self.model.phase != Phase::Ready {
+                    return;
+                }
+                self.sync_settings(ctx, true);
+                self.handle.send(Command::DownloadNew {
+                    selection: Selection {
+                        categories: derive::wanted(&self.checked),
+                        include_preview: self.include_preview,
+                    },
+                    custom_extensions: self.custom_ext.clone(),
+                    output: PathBuf::from(self.output.trim()),
+                    links: self.model.links.iter().filter_map(crate::links_state::LinkRow::pick).collect(),
+                });
+                self.link_notice = None;
             }
             Action::Download => {
                 if !matches!(self.model.phase, Phase::Ready | Phase::Cancelled) {
@@ -617,8 +787,8 @@ impl App {
     /// `ui-spec` section 7. Consumed before any widget draws, so they work from a text field too.
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let hit = |key: Key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, key)));
-        let (focus_url, browse, primary, pause, settings, quit) =
-            (hit(Key::L), hit(Key::O), hit(Key::Enter), hit(Key::P), hit(Key::Comma), hit(Key::Q));
+        let (focus_url, browse, primary, pause, settings, quit, update) =
+            (hit(Key::L), hit(Key::O), hit(Key::Enter), hit(Key::P), hit(Key::Comma), hit(Key::Q), hit(Key::U));
         if self.settings_open || self.quit_open {
             return;
         }
@@ -627,6 +797,10 @@ impl App {
         }
         if browse {
             self.perform(Action::Browse, ctx);
+        }
+        // Ctrl+U runs the URL button when it says Update.
+        if update && self.updating_link() && !self.url.trim().is_empty() {
+            self.perform(Action::Scan, ctx);
         }
         if primary {
             if let Some(a) = self.primary_action() {

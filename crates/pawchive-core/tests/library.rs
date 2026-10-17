@@ -879,9 +879,11 @@ async fn a_scan_reports_its_steps_in_order() {
     assert_eq!(first[1], ScanStep::Reading);
     assert!(matches!(first[2], ScanStep::Page(p) if p.pages == 1));
     assert!(matches!(first[3], ScanStep::Page(p) if p.pages == 2));
-    assert_eq!(first.len(), 4);
+    assert_eq!(first[4], ScanStep::Saving);
+    assert_eq!(first.len(), 5);
     // Unchanged: Checking and nothing else.
     assert_eq!(run(ScanMode::Update).await, vec![ScanStep::Checking]);
+    // (no Saving: an unchanged profile writes nothing but its scan time)
     // Full rescan: no Checking, goes straight to reading.
     let full = run(ScanMode::Full).await;
     assert_eq!(full[0], ScanStep::Reading);
@@ -893,8 +895,11 @@ async fn a_scan_reports_its_steps_in_order() {
         f.world().set_updated("u2");
     }
     let missing = run(ScanMode::Update).await;
-    let tail: Vec<_> = missing.iter().rev().take(2).rev().cloned().collect();
-    assert_eq!(tail, vec![ScanStep::Missing { done: 0, total: 1 }, ScanStep::Missing { done: 1, total: 1 }]);
+    let tail: Vec<_> = missing.iter().rev().take(3).rev().cloned().collect();
+    assert_eq!(
+        tail,
+        vec![ScanStep::Missing { done: 0, total: 1 }, ScanStep::Missing { done: 1, total: 1 }, ScanStep::Saving]
+    );
 }
 
 #[tokio::test]

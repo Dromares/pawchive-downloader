@@ -2537,6 +2537,7 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "image",
+ "libc",
  "pawchive-core",
  "rfd",
 ]

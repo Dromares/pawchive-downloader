@@ -41,7 +41,7 @@ pub enum ScanMode {
 
 /// Where a scan is, for a front end that shows progress. Sent in this order: `Checking` (update
 /// scans only), `Reading`, then one `Page` per page, then `Missing` (`done` 0, then once more after
-/// each saved post the list did not hold). An update that finds the profile unchanged stops after `Checking`.
+/// each saved post the list did not hold), then `Saving`. An update that finds the profile unchanged stops after `Checking`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanStep {
     /// The one profile request that decides whether the list needs reading.
@@ -52,6 +52,8 @@ pub enum ScanStep {
     Page(ScanProgress),
     /// Saved posts the list did not hold are being asked for one by one.
     Missing { done: usize, total: usize },
+    /// Everything is read; the one transaction that records it is about to run.
+    Saving,
 }
 
 /// How a post differs from the saved library, for the GUI's New / Updated / Gone from site labels.
@@ -242,6 +244,7 @@ impl Library {
             new_files: out.new_files,
             gone_posts: out.gone_posts,
         });
+        on_step(ScanStep::Saving);
         self.commit_scan(ScanWrite {
             creator,
             name: profile.name.as_deref(),

@@ -119,6 +119,8 @@ pub struct Planned {
     pub origin: JobOrigin,
     /// The leaf had to be changed to avoid a clash (`4 (2).png`), so the UI says `Saved as …`.
     pub renamed: bool,
+    /// Index into the `files` the plan was made from, for a Pawchive file or thumbnail.
+    pub file: Option<usize>,
 }
 
 type PostNames = HashMap<String, (String, NameAllocator)>;
@@ -161,7 +163,7 @@ pub fn plan_all(
     let root = output.join(creator_dir(creator.service.as_str(), &creator.id));
     let mut per_post: PostNames = HashMap::new();
     let mut out: Vec<Planned> = Vec::new();
-    for f in files {
+    for (index, f) in files.iter().enumerate() {
         let (dir, alloc) = post_names(&mut per_post, &f.post_id, f.post_published.as_deref(), &f.post_title);
         let thumb = thumbnail_only(f);
         let mut name = sanitize_component(&f.name, MAX_COMPONENT_BYTES);
@@ -188,6 +190,7 @@ pub fn plan_all(
             },
             origin: JobOrigin::Pawchive,
             renamed: false,
+            file: Some(index),
         });
     }
     if let Some(lp) = links {
@@ -225,6 +228,7 @@ fn plan_links(root: &Path, per_post: &mut PostNames, out: &mut Vec<Planned>, lp:
                 },
                 origin: JobOrigin::Link { link: link.id, child },
                 renamed,
+                file: None,
             });
         };
         match &res.kind {

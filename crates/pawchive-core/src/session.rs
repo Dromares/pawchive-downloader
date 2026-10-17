@@ -124,7 +124,12 @@ pub enum UpdateStep {
     Checking,
     Reading,
     Page(ScanProgress),
-    CheckingMissing { done: usize, total: usize },
+    CheckingMissing {
+        done: usize,
+        total: usize,
+    },
+    /// The scan is read completely and is being written to the library.
+    Saving,
 }
 
 /// Why a saved profile is on screen.
@@ -1028,6 +1033,7 @@ impl Session {
                         (false, ScanStep::Missing { done, total }) => {
                             Some(UiEvent::UpdateStep(UpdateStep::CheckingMissing { done, total }))
                         }
+                        (false, ScanStep::Saving) => Some(UiEvent::UpdateStep(UpdateStep::Saving)),
                     };
                     if let Some(e) = event {
                         let _ = ev.send(e);
@@ -1173,11 +1179,6 @@ impl Session {
                     self.saved_open = false;
                     self.reset_links();
                 }
-                self.log(format!(
-                    "Removed {}/{} from the library. Downloaded files were kept.",
-                    creator.service.as_str(),
-                    creator.id
-                ));
                 self.emit(UiEvent::ProfileRemoved { creator: creator.clone() });
                 self.send_profiles();
             }
