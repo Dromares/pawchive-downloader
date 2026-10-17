@@ -447,17 +447,6 @@ impl App {
             if removed {
                 self.remove_confirm = None;
             }
-            if loaded {
-                if let Some(t) = dev::tab() {
-                    self.tab = match t.as_str() {
-                        "posts" => Tab::Posts,
-                        "links" => Tab::Links,
-                        "problems" => Tab::Problems,
-                        "log" => Tab::Log,
-                        _ => Tab::Files,
-                    };
-                }
-            }
             if dev::confirm_remove() && self.remove_confirm.is_none() && self.model.phase == Phase::Empty {
                 self.remove_confirm = self.model.profiles().first().map(|p| p.creator.clone());
             }
@@ -479,6 +468,18 @@ impl App {
                 if let Some(dir) = dev::autodownload_dir() {
                     self.output = dir;
                     self.perform(if dev::download_new_only() { Action::DownloadNew } else { Action::Download }, ctx);
+                }
+            }
+            // (After the scan_done reset above: a developer's tab choice wins.)
+            if loaded {
+                if let Some(t) = dev::tab() {
+                    self.tab = match t.as_str() {
+                        "posts" => Tab::Posts,
+                        "links" => Tab::Links,
+                        "problems" => Tab::Problems,
+                        "log" => Tab::Log,
+                        _ => Tab::Files,
+                    };
                 }
             }
         }

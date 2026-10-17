@@ -984,7 +984,11 @@ mod session_flow {
     }
 
     async fn run(posts: Vec<Value>) -> Run {
-        let f = fixture(fanbox("119251"), posts, "u1").await;
+        run_for(fanbox("119251"), posts).await
+    }
+
+    async fn run_for(creator: CreatorRef, posts: Vec<Value>) -> Run {
+        let f = fixture(creator, posts, "u1").await;
         let lib = Library::open(f.data_dir.path()).unwrap().with_clock({
             let c = f.clock.clone();
             move || *c.lock().unwrap()
@@ -995,7 +999,7 @@ mod session_flow {
         };
         let (handle, rx) =
             spawn_with_library(Settings::default(), f.client.hosts.clone(), tuning, Arc::new(|| {}), Some(Ok(lib)));
-        let url = "https://pawchive.pw/fanbox/user/119251".to_string();
+        let url = format!("https://pawchive.pw/fanbox/user/{}", f.creator.id);
         Run { f, handle, rx, url }
     }
 
@@ -1219,5 +1223,46 @@ mod session_flow {
                 .count();
         assert_eq!(copies, files.len(), "re-adding then downloading saves name (2) copies");
         assert!(files.iter().all(|p| p.exists()), "and the first copies are untouched");
+    }
+
+    /// Files Pawchive has no copy of are never fetched in full; their thumbnails still go with
+    /// "Download all" when the user ticks Preview only, are left out of "Download new only", and are
+    /// not recorded in the library either way.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn thumbnails_of_missing_images_follow_download_all_and_not_new_only() {
+        let r = run_for(fanbox("1386751"), no_edited_posts()).await;
+        r.handle.send(Command::Scan { url: r.url.clone() });
+        let (_, first) = loaded(&r.rx);
+        let images = first.files.iter().filter(|f| f.name.ends_with(".jpg") || f.name.ends_with(".png")).count();
+        assert!(images > 0 && first.files.iter().all(|f| f.missing), "{images} images, all gone from Pawchive");
+        let out = TempDir::new().unwrap();
+        let sel = |preview| Selection { categories: Category::ALL.into_iter().collect(), include_preview: preview };
+        // New only: nothing in full size, no thumbnails: nothing to do.
+        r.handle.send(Command::DownloadNew {
+            selection: sel(true),
+            custom_extensions: String::new(),
+            output: out.path().to_path_buf(),
+            links: vec![],
+        });
+        let (events, _) = until(&r.rx, |e| matches!(e, UiEvent::DownloadFinished(_)).then_some(()));
+        assert!(!events.iter().any(|e| matches!(e, UiEvent::DownloadStarted { .. })), "{events:?}");
+        // Download all with Preview only: thumbnail jobs for the images, nothing recorded.
+        r.handle.send(Command::StartDownload {
+            selection: sel(true),
+            custom_extensions: String::new(),
+            output: out.path().to_path_buf(),
+            links: vec![],
+        });
+        let (events, _) = until(&r.rx, |e| matches!(e, UiEvent::DownloadFinished(_)).then_some(()));
+        let jobs = events
+            .iter()
+            .find_map(|e| match e {
+                UiEvent::DownloadStarted { jobs } => Some(jobs.clone()),
+                _ => None,
+            })
+            .expect("a download started");
+        assert_eq!(jobs.len(), images);
+        assert!(jobs.iter().all(|j| j.label.contains(".thumb.")), "{jobs:?}");
+        assert!(r.f.lib.posts(&r.f.creator).unwrap().iter().flat_map(|p| &p.files).all(|f| !f.downloaded));
     }
 }
