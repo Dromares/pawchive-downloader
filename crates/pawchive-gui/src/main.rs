@@ -30,7 +30,7 @@ fn main() -> eframe::Result {
     let settings = Settings::load();
     let mut hosts = Hosts::default();
     if let Some(base) = dev::base_url_override() {
-        hosts = Hosts { api: base.clone(), file: base.clone(), thumb: base, external: None };
+        hosts = Hosts { api: base.clone(), file: base.clone(), thumb: base.clone(), external: Some(base) };
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

@@ -118,6 +118,8 @@ pub enum ResolvedKind {
         children: Vec<Child>,
         /// The listing was not confirmed complete (see `drive::PAGE_LIMIT`): there may be more files.
         partial: bool,
+        /// The folder had more than `drive::MAX_FILES` files and the rest were left out.
+        capped: bool,
     },
 }
 

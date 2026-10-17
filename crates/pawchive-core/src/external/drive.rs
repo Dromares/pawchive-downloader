@@ -292,6 +292,7 @@ pub async fn resolve_folder(
 ) -> Result<Resolved, ResolveError> {
     let mut children: Vec<Child> = Vec::new();
     let mut partial = false;
+    let mut capped = false;
     let mut root_name = None;
     let mut visited = std::collections::HashSet::new();
     // (folder id, path of folder names below the root); a stack, so sub-folders are depth-first in order.
@@ -329,6 +330,7 @@ pub async fn resolve_folder(
                 // Docs, Sheets, shortcuts: no file to download.
             } else if children.len() >= MAX_FILES {
                 partial = true;
+                capped = true;
             } else {
                 children.push(Child { id: e.id, dirs: dirs.clone(), name: e.name, size: e.size, mime: Some(e.mime) });
             }
@@ -348,7 +350,7 @@ pub async fn resolve_folder(
         name: root_name.unwrap_or_else(|| "Google Drive folder".to_string()),
         size,
         content_type: None,
-        kind: ResolvedKind::Folder { children, partial },
+        kind: ResolvedKind::Folder { children, partial, capped },
     })
 }
 

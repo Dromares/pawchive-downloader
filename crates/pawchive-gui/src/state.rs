@@ -1099,4 +1099,116 @@ mod tests {
         assert!(explain_scan_error("could not parse response: x", 0)
             .starts_with("Pawchive returned something we couldn't read."));
     }
+
+    // ---- external links -----------------------------------------------------------------------------
+
+    fn link_of(id: usize, kind: pawchive_core::links::LinkKind) -> pawchive_core::links::Link {
+        pawchive_core::links::Link {
+            id,
+            url: format!("https://x.test/{id}"),
+            host: pawchive_core::links::Host::Mediafire,
+            kind,
+            name_hint: None,
+            posts: vec![PostRef { id: "9".into(), title: "T".into(), published: None }],
+        }
+    }
+
+    #[test]
+    fn a_post_scan_remembers_its_target_and_link_checks_update_the_rows() {
+        use pawchive_core::external::{DeadReason, Resolved, ResolvedKind};
+        use pawchive_core::links::LinkKind;
+        let now = Instant::now();
+        let mut m = Model::default();
+        let target = ScanTarget { creator: creator(), post_id: Some("9".into()) };
+        m.apply(UiEvent::ScanStarted(target), now);
+        let kind = LinkKind::MediafireFile { key: "k".into(), page_url: "p".into() };
+        let post = PostRef { id: "9".into(), title: "T".into(), published: None };
+        m.apply(
+            UiEvent::ScanFinished {
+                creator: creator(),
+                posts: 1,
+                files: vec![],
+                links: vec![link_of(0, kind.clone()), link_of(1, kind)],
+                post: Some(post),
+            },
+            now,
+        );
+        assert_eq!((m.links.len(), m.links_posts, m.phase), (2, 1, Phase::Ready));
+        assert!(m.scan_post.is_some() && m.scan_target.as_ref().unwrap().post_id.as_deref() == Some("9"));
+        assert_eq!(m.log.back().unwrap().text, "Scan finished: post 9, 0 files, 2 external links (fanbox/1)");
+        m.apply(UiEvent::LinkChecking { link: 0 }, now);
+        assert_eq!(m.links[0].check, Check::Checking);
+        m.apply(UiEvent::CheckProgress { done: 0, total: 2 }, now);
+        assert_eq!(m.checking, Some((0, 2)));
+        let res = Resolved { name: "a.rar".into(), size: Some(5), content_type: None, kind: ResolvedKind::File };
+        m.apply(UiEvent::LinkResolved { link: 0, resolved: res }, now);
+        m.apply(UiEvent::LinkDead { link: 1, reason: DeadReason::Removed }, now);
+        assert!(m.links[0].resolved().is_some() && matches!(m.links[1].check, Check::Dead(DeadReason::Removed)));
+        m.apply(UiEvent::LinkCheckFailed { link: 0, message: None }, now);
+        assert_eq!(m.links[0].check, Check::NotChecked, "skipped: back to unchecked, no note");
+        m.apply(UiEvent::CheckFinished { skipped: false }, now);
+        assert_eq!(m.checking, None);
+        // A new scan clears the links and the filter.
+        m.link_filter = LinkFilter::Drive;
+        m.apply(UiEvent::ScanStarted(ScanTarget { creator: creator(), post_id: None }), now);
+        assert!(m.links.is_empty() && m.link_filter == LinkFilter::All && m.scan_post.is_none());
+    }
+
+    #[test]
+    fn link_files_are_rows_of_the_run_but_not_pawchive_rows_and_hosts_cool_down_alone() {
+        let now = Instant::now();
+        let mut m = Model::default();
+        let info = |id: u64, label: &str, origin| pawchive_core::session::JobInfo {
+            id,
+            label: label.into(),
+            expected_size: Some(10),
+            origin,
+            renamed: false,
+        };
+        m.apply(
+            UiEvent::DownloadStarted {
+                jobs: vec![
+                    info(0, "post/1.jpg", JobOrigin::Pawchive),
+                    info(1, "post/Folder/Lineart/1.jpg", JobOrigin::Link { link: 0, child: Some(2) }),
+                    info(2, "post/Super Girl.rar", JobOrigin::Link { link: 1, child: None }),
+                ],
+            },
+            now,
+        );
+        assert_eq!(m.rows.len(), 3);
+        assert_eq!((m.pawchive_rows().count(), m.link_file_rows()), (1, 2), "the Files tab never lists link files");
+        assert_eq!((m.rows[1].post.as_str(), m.rows[1].name.as_str()), ("post", "Folder/Lineart/1.jpg"));
+        assert_eq!(m.link_jobs[&(0, Some(2))], 1);
+        assert_eq!(m.link_jobs[&(1, None)], 2);
+        assert_eq!(m.link_job_rows(0, None).len(), 1, "a folder parent sees its children's jobs");
+        // What the server said decides the type, never the link text.
+        m.apply(
+            UiEvent::Download(Event::Meta {
+                id: 2,
+                name: Some("Super Girl.rar".into()),
+                content_type: Some("application/x-rar".into()),
+            }),
+            now,
+        );
+        assert_eq!(m.rows[2].content_type.as_deref(), Some("application/x-rar"));
+        assert_eq!(m.link_outcome(1), Some(crate::links_state::RunOutcome::Queued));
+        m.apply(UiEvent::Download(Event::Done { id: 2, bytes: 10 }), now);
+        assert_eq!(m.link_outcome(1), Some(crate::links_state::RunOutcome::Saved));
+        m.apply(
+            UiEvent::Download(Event::Failed {
+                id: 1,
+                error: "Download limit reached on Google Drive. Try again later.".into(),
+                permanent: false,
+            }),
+            now,
+        );
+        assert_eq!(m.link_outcome(0), Some(crate::links_state::RunOutcome::Failed { quota: true }));
+        // Only the throttled host cools down; Pawchive's own pause is untouched.
+        m.apply(UiEvent::Download(Event::ExtCooldown { host: ExtHost::Drive, secs: 60 }), now);
+        assert_eq!(m.host_cooldown_secs(ExtHost::Drive, now), Some(60));
+        assert_eq!(m.host_cooldown_secs(ExtHost::Mediafire, now), None);
+        assert_eq!(m.slow_secs(now), None, "the global cool-down is Pawchive-only");
+        m.tick(now + Duration::from_secs(61));
+        assert_eq!(m.host_cooldown_secs(ExtHost::Drive, now + Duration::from_secs(61)), None);
+    }
 }

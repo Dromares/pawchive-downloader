@@ -125,7 +125,7 @@ impl LinkRow {
                     None if pick(self.on) => (0, true),
                     _ => (0, false),
                 },
-                ResolvedKind::Folder { children, partial } => {
+                ResolvedKind::Folder { children, partial, .. } => {
                     let (mut sum, mut unknown, mut any) = (0, false, false);
                     for (c, on) in children.iter().zip(&self.kids_on) {
                         if !pick(*on) {
@@ -406,7 +406,7 @@ mod tests {
             name: "Super Girl".into(),
             size: None,
             content_type: None,
-            kind: ResolvedKind::Folder { children, partial },
+            kind: ResolvedKind::Folder { children, partial, capped: false },
         }
     }
 

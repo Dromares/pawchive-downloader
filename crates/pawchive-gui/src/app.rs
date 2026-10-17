@@ -328,6 +328,8 @@ impl App {
                 self.link_focus = 0;
                 if dev::tick_links() {
                     self.tick_all_links(true);
+                } else if dev::check_links() {
+                    self.link_checks.extend((0..self.model.links.len()).filter(|&i| self.model.links[i].needs_check()));
                 }
                 if let Some(dir) = dev::autodownload_dir() {
                     self.output = dir;
@@ -558,6 +560,12 @@ impl App {
                 }),
             }
         };
+        if let Some(d) = dev::export_dir() {
+            // Developer shortcut: no dialog, the file goes straight into this folder.
+            let path = PathBuf::from(d).join(&name);
+            let _ = self.export_tx.send(std::fs::write(&path, bytes).map(|()| path).map_err(|e| e.to_string()));
+            return;
+        }
         let dir = self
             .last_export_dir
             .clone()
@@ -869,5 +877,179 @@ mod tests {
         let download = at("Download 1");
         assert_eq!(download, order.len() - 1, "bottom bar must come last: {order:?}");
         assert!(at("Browse…") < at("Files 1") && at("Files 1") < download, "{order:?}");
+    }
+
+    // ---- External links tab ---------------------------------------------------------------------------
+
+    fn link_fixture(
+        id: usize,
+        host: pawchive_core::links::Host,
+        kind: pawchive_core::links::LinkKind,
+    ) -> pawchive_core::links::Link {
+        pawchive_core::links::Link {
+            id,
+            url: format!("https://x.test/{id}"),
+            host,
+            kind,
+            name_hint: None,
+            posts: vec![pawchive_core::links::PostRef {
+                id: "1".into(),
+                title: "T".into(),
+                published: Some("2026-01-01T00:00:00".into()),
+            }],
+        }
+    }
+
+    /// An app on the External links tab with a Drive folder (3 files), a Mediafire file and a Mega link.
+    fn links_app(ctx: &egui::Context) -> App {
+        use pawchive_core::creator::{CreatorRef, ScanTarget};
+        use pawchive_core::external::{Child, Resolved, ResolvedKind};
+        use pawchive_core::links::{Host, LinkKind};
+        use pawchive_core::model::Service;
+        let (handle, rx) = pawchive_core::session::spawn(
+            Settings::default(),
+            Hosts::default(),
+            pawchive_core::session::Tuning::default(),
+            Arc::new(|| {}),
+        );
+        let mut app = App::with_context(ctx, Settings::default(), handle, rx);
+        let creator = CreatorRef { service: Service::Patreon, id: "1".into() };
+        let now = Instant::now();
+        app.model.apply(UiEvent::ScanStarted(ScanTarget { creator: creator.clone(), post_id: None }), now);
+        let links = vec![
+            link_fixture(0, Host::Drive, LinkKind::DriveFolder { id: "F".into() }),
+            link_fixture(1, Host::Mediafire, LinkKind::MediafireFile { key: "k".into(), page_url: "p".into() }),
+            link_fixture(2, Host::Mega, LinkKind::Unsupported { why: "Mega isn't supported".into() }),
+        ];
+        app.model.apply(UiEvent::ScanFinished { creator, posts: 1, files: vec![], links, post: None }, now);
+        let kids = (0..3)
+            .map(|i| Child { id: format!("c{i}"), dirs: vec![], name: format!("{i}.jpg"), size: Some(10), mime: None })
+            .collect();
+        let folder = Resolved {
+            name: "Folder".into(),
+            size: Some(30),
+            content_type: None,
+            kind: ResolvedKind::Folder { children: kids, partial: false, capped: false },
+        };
+        app.model.apply(UiEvent::LinkResolved { link: 0, resolved: folder }, now);
+        let file = Resolved { name: "a.rar".into(), size: Some(5), content_type: None, kind: ResolvedKind::File };
+        app.model.apply(UiEvent::LinkResolved { link: 1, resolved: file }, now);
+        app.tab = Tab::Links;
+        app
+    }
+
+    fn key_event(key: Key, modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers }
+    }
+
+    fn frame_with(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1120.0, 760.0))),
+            events,
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| app.draw(ui));
+        out.drop_without_applying_deltas();
+    }
+
+    /// Section 2.3: the list is one Tab stop and the keys work inside it: Space ticks (never a dead or
+    /// unsupported row), Right/Left open and close a folder (Left on a child goes to its parent), Home/End
+    /// jump, Ctrl+A selects the shown rows.
+    #[test]
+    fn the_links_list_is_driven_from_the_keyboard() {
+        use crate::links_state::Tri;
+        let ctx = egui::Context::default();
+        let mut app = links_app(&ctx);
+        for _ in 0..3 {
+            frame_with(&ctx, &mut app, vec![]);
+        }
+        ctx.memory_mut(|m| m.request_focus(egui::Id::unique("external_links_list")));
+        frame_with(&ctx, &mut app, vec![]);
+        let press = |ctx: &egui::Context, app: &mut App, k: Key, m: Modifiers| {
+            frame_with(ctx, app, vec![key_event(k, m)]);
+            frame_with(ctx, app, vec![]);
+        };
+        press(&ctx, &mut app, Key::Space, Modifiers::NONE);
+        assert_eq!(app.model.links[0].tri(), Tri::All, "Space ticks the folder: all its files");
+        press(&ctx, &mut app, Key::ArrowRight, Modifiers::NONE);
+        assert!(app.model.links[0].open, "Right opens the folder");
+        press(&ctx, &mut app, Key::ArrowDown, Modifiers::NONE);
+        assert_eq!(app.link_focus, 1);
+        press(&ctx, &mut app, Key::Space, Modifiers::NONE);
+        assert_eq!(app.model.links[0].tri(), Tri::Some, "one child off: the parent shows the dash");
+        assert_eq!(app.model.links[0].selected(), 2);
+        press(&ctx, &mut app, Key::ArrowLeft, Modifiers::NONE);
+        assert_eq!(app.link_focus, 0, "Left on a child goes to its parent");
+        press(&ctx, &mut app, Key::ArrowLeft, Modifiers::NONE);
+        assert!(!app.model.links[0].open, "Left on an open folder closes it");
+        press(&ctx, &mut app, Key::End, Modifiers::NONE);
+        assert_eq!(app.link_focus, 2);
+        press(&ctx, &mut app, Key::Space, Modifiers::NONE);
+        assert_eq!(app.model.links[2].selected(), 0, "an unsupported link is never ticked");
+        press(&ctx, &mut app, Key::Home, Modifiers::NONE);
+        assert_eq!(app.link_focus, 0);
+        press(&ctx, &mut app, Key::Enter, Modifiers::NONE);
+        assert!(app.model.links[0].open, "Enter opens a folder");
+        press(&ctx, &mut app, Key::A, Modifiers::COMMAND);
+        assert_eq!(app.model.links[1].selected(), 1, "Ctrl+A selects the shown rows");
+        assert_eq!(app.model.links[0].tri(), Tri::All);
+        assert_eq!(app.model.links[2].selected(), 0);
+    }
+
+    /// Section 1.4: Check links, Export list, the four chips, the header checkbox, then the list as ONE
+    /// stop, and the bottom bar last.
+    #[test]
+    fn tab_order_in_the_links_tab_ends_with_one_list_stop_then_the_bottom_bar() {
+        use std::collections::HashMap;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = links_app(&ctx);
+        app.output = "/tmp/pawchive-tab-walk".into();
+        // One unchecked, ticked link: Check links and Download are both live.
+        app.model.links[1].check = crate::links_state::Check::NotChecked;
+        app.model.links[1].set_on(true);
+        let mut nodes: HashMap<egui::accesskit::NodeId, String> = HashMap::new();
+        let mut frame = |app: &mut App, tab: bool| -> Option<String> {
+            let events = if tab { vec![key_event(Key::Tab, Modifiers::NONE)] } else { vec![] };
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1120.0, 760.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| app.draw(ui));
+            let update = out.platform_output.accesskit_update.take();
+            out.drop_without_applying_deltas();
+            let update = update?;
+            for (id, node) in update.nodes {
+                let name =
+                    node.label().or_else(|| node.value()).map_or_else(|| format!("{:?}", node.role()), str::to_string);
+                nodes.insert(id, name);
+            }
+            nodes.get(&update.focus).cloned()
+        };
+        for _ in 0..3 {
+            frame(&mut app, false);
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..40 {
+            frame(&mut app, true);
+            let Some(name) = frame(&mut app, false) else { continue };
+            if seen.first() == Some(&name) {
+                break;
+            }
+            seen.push(name);
+        }
+        let at = |name: &str| seen.iter().position(|n| n == name).unwrap_or_else(|| panic!("{name} missing: {seen:?}"));
+        let (check, export) = (at("Check links"), at("Export list    "));
+        let (first_chip, last_chip) = (at("All 3"), at("Not downloadable 1"));
+        let header = at("Select all shown links");
+        let download = at("Download 1");
+        assert!(check < export && export < first_chip && first_chip < last_chip, "{seen:?}");
+        assert!(last_chip < header, "{seen:?}");
+        assert!(
+            header + 2 == download,
+            "exactly one stop (the list) between the header checkbox and the bottom bar: {seen:?}"
+        );
+        assert_eq!(download, seen.len() - 1, "bottom bar last: {seen:?}");
     }
 }

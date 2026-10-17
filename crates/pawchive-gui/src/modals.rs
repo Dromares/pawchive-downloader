@@ -40,7 +40,7 @@ impl App {
             {
                 self.settings.delay_ms = (secs * 1000.0).round() as u64;
             }
-            ui.label(dim(p, "At least 1 s. Pawchive asks for no more than one request per second."));
+            ui.label(dim(p, "At least 1 s. Pawchive asks for no more than one request per second. Other sites get the same pause, each on its own clock."));
             ui.add_space(S3);
 
             ui.label(RichText::new("Contact (optional)").strong());
@@ -51,7 +51,7 @@ impl App {
                     .desired_width(f32::INFINITY)
                     .margin(Margin::symmetric(8, 7)),
             );
-            ui.label(dim(p, "Sent in the User-Agent so the site can reach you:"));
+            ui.label(dim(p, "Sent to Pawchive in the User-Agent so it can reach you:"));
             ui.label(RichText::new(self.settings.clone().normalized().user_agent()).monospace().size(T_SMALL).color(p.ink_dim));
             ui.add_space(S3);
 
@@ -75,7 +75,7 @@ impl App {
             });
             ui.label(dim(
                 p,
-                "Not needed for public profiles. Only the path is remembered; the file's contents are never shown or saved.",
+                "Not needed for public profiles. Only sent to pawchive.pw. Only the path is remembered; the file's contents are never shown or saved.",
             ));
             if busy {
                 ui.add_space(S2);

@@ -20,6 +20,7 @@ use crate::view::size_label;
 use crate::widgets::{dim, num, Cols};
 
 const LROW_H: f32 = 44.0;
+const EXPORT_W: f32 = 112.0;
 
 /// Status glyphs. The no-entry sign and the chevron are drawn: the bundled fonts have neither.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -308,21 +309,9 @@ impl App {
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = S2;
-                let can_export = n > 0 && !matches!(self.model.phase, Phase::Scanning | Phase::Empty | Phase::ScanError);
-                ui.add_enabled_ui(can_export, |ui| {
-                    let r = ui.menu_button("Export list    ", |ui| {
-                        if ui.button("As text (.txt)").clicked() {
-                            acts.push(Action::ExportList(ExportFormat::Txt));
-                            ui.close();
-                        }
-                        if ui.button("As CSV (.csv)").clicked() {
-                            acts.push(Action::ExportList(ExportFormat::Csv));
-                            ui.close();
-                        }
-                    });
-                    let rc = r.response.rect;
-                    chevron(ui, if can_export { p.ink } else { p.ink_dim }, true, pos2(rc.right() - 14.0, rc.center().y));
-                });
+                // Tab order is widget creation order and the spec wants Check links before Export list, but
+                // Export sits on the right: reserve its slot first, create Check links, then fill the slot.
+                let (export_slot, _) = ui.allocate_exact_size(vec2(EXPORT_W, 32.0), Sense::hover());
                 let can_check = editable && check_n > 0 && self.model.checking.is_none();
                 let tip = format!(
                     "Checks the {check_n} links shown that haven't been checked yet. About {} min at the current pause.",
@@ -332,6 +321,30 @@ impl App {
                 if r.on_hover_text(tip).clicked() {
                     acts.push(Action::CheckLinks);
                 }
+                let can_export = n > 0 && !matches!(self.model.phase, Phase::Scanning | Phase::Empty | Phase::ScanError);
+                let mut slot = ui.new_child(UiBuilder::new().max_rect(export_slot).layout(Layout::right_to_left(Align::Center)));
+                slot.add_enabled_ui(can_export, |ui| {
+                    let r = ui
+                        .menu_button("Export list    ", |ui| {
+                            if ui.button("As text (.txt)").clicked() {
+                                acts.push(Action::ExportList(ExportFormat::Txt));
+                                ui.close();
+                            }
+                            if ui.button("As CSV (.csv)").clicked() {
+                                acts.push(Action::ExportList(ExportFormat::Csv));
+                                ui.close();
+                            }
+                        });
+                    let rc = r.response.rect;
+                    chevron(ui, if can_export { p.ink } else { p.ink_dim }, true, pos2(rc.right() - 14.0, rc.center().y));
+                    if !can_export {
+                        r.response.on_disabled_hover_text(if n == 0 {
+                            "No links to export."
+                        } else {
+                            "Wait for the scan to finish so the list is complete."
+                        });
+                    }
+                });
             });
         });
 
@@ -972,13 +985,20 @@ impl App {
                     "Ready",
                     Some(links_state::type_label(&res.name, res.content_type.as_deref()).to_string()),
                 ),
-                ResolvedKind::Folder { children, partial } => {
+                ResolvedKind::Folder { children, partial, capped } => {
                     let n = children.len();
                     if *partial {
+                        let tip = if *capped {
+                            INCOMPLETE_TIP.replace("the {n} files shown", "the 1,000 files shown")
+                        } else {
+                            INCOMPLETE_TIP.replace("{n}", &n.to_string())
+                        };
+                        let line2 =
+                            if *capped { "First 1,000 files only".to_string() } else { format!("At least {n} files") };
                         Look {
                             info: true,
-                            tooltip: Some(INCOMPLETE_TIP.replace("{n}", &n.to_string())),
-                            ..Look::simple(Ic::Dot, p.ink_dim, "Ready", Some(format!("At least {n} files")))
+                            tooltip: Some(tip),
+                            ..Look::simple(Ic::Dot, p.ink_dim, "Ready", Some(line2))
                         }
                     } else {
                         Look::simple(
