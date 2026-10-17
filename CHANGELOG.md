@@ -19,6 +19,12 @@ All notable changes to Pawchive Downloader are recorded here. The format follows
 - **A release-testing checklist** in the README: the built AppImage is pasted into on Wayland and X11 with
   each method before a release.
 
+### Known limitations
+
+- **Middle-click paste was tested on sway (wlroots, Wayland) and on X11 without a window manager, in
+  the AppImage on the build host and on Debian 12.** KDE Plasma and GNOME were not tried for it. A
+  compositor that offers no PRIMARY selection pastes nothing on middle-click and shows no error.
+
 ## [0.1.0] - 2026-10-16
 
 First release: a desktop app for downloading a creator's files from [Pawchive](https://pawchive.pw).
