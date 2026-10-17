@@ -9,6 +9,7 @@ mod modals;
 mod state;
 mod theme;
 mod urlcheck;
+mod urlmenu;
 mod view;
 mod widgets;
 

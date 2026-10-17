@@ -109,12 +109,6 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = S2;
             let w = ui.available_width() - 76.0 - S2;
-            let edit = TextEdit::singleline(&mut self.url)
-                .id(url_id())
-                .hint_text("Paste a Pawchive profile link")
-                .desired_width(w)
-                .margin(Margin::symmetric(8, 7))
-                .interactive(editable);
             let has_error = self.url_error.is_some();
             let resp = ui
                 .scope(|ui| {
@@ -124,7 +118,7 @@ impl App {
                             ws.bg_stroke = Stroke::new(1.5, p.bad);
                         }
                     }
-                    ui.add(edit)
+                    crate::urlmenu::field(ui, url_id(), &mut self.url, w, editable)
                 })
                 .inner;
             if resp.changed() {

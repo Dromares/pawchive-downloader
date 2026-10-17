@@ -93,8 +93,8 @@ is any empty directory with about 6 GB free.
    ```
    $IN cargo build --release
    $IN cargo packager --release --formats appimage
-   cp $REPO/target/release/pawchive-downloader_0.1.0_x86_64.AppImage $WORK/pawchive-downloader-0.1.0-x86_64.AppImage
-   cd $WORK && sha256sum pawchive-downloader-0.1.0-x86_64.AppImage > pawchive-downloader-0.1.0-x86_64.AppImage.sha256
+   cp $REPO/target/release/pawchive-downloader_0.1.1_x86_64.AppImage $WORK/pawchive-downloader-0.1.1-x86_64.AppImage
+   cd $WORK && sha256sum pawchive-downloader-0.1.1-x86_64.AppImage > pawchive-downloader-0.1.1-x86_64.AppImage.sha256
    ```
 
    The packager settings are in `crates/pawchive-gui/Cargo.toml` (`[package.metadata.packager]`); the icons
@@ -104,12 +104,45 @@ is any empty directory with about 6 GB free.
 
    ```
    objdump -T $REPO/target/release/pawchive-downloader | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1   # GLIBC_2.35
-   $WORK/pawchive-downloader-0.1.0-x86_64.AppImage --appimage-extract     # unpacks to ./squashfs-root
+   $WORK/pawchive-downloader-0.1.1-x86_64.AppImage --appimage-extract     # unpacks to ./squashfs-root
    find squashfs-root -name '*.so*'                                         # nothing is bundled
    ```
 
    Nothing is bundled on purpose: the graphics stack (`libGL`, `libEGL`, `libvulkan`, `libwayland-*`,
    `libxkbcommon`, `libX11`) is loaded at run time from the host, so the host's own GPU driver is used.
+
+## Release testing
+
+Before a tag is pushed, run the **built AppImage** (not `cargo run`) through the checks below and put the
+pass/fail lines in the release ticket and in the PR. Packaging bugs only show up in the packaged binary: the
+0.1.0 AppImage could not paste at all because the clipboard backend was not compiled in (DAN-1600), and
+`cargo run` would have shown the same, but the AppImage is what users run.
+
+Run each check on **Wayland** (leave `DISPLAY` set or not, `WAYLAND_DISPLAY` set) and on **X11**
+(`env -u WAYLAND_DISPLAY`), and say which compositor or desktop it was. A second machine or a clean
+Debian 12 root filesystem is worth it for the first release after a packaging change.
+
+Paste into the **Profile link** field. Put one URL in the clipboard and a different one in the PRIMARY
+selection, with a real clipboard owner, so the result shows which source was used (Wayland:
+`wl-copy 'https://pawchive.pw/fanbox/user/119251'` and `wl-copy --primary 'https://pawchive.pw/patreon/user/4242'`;
+X11: `xclip -selection clipboard` and `xclip -selection primary`). Click the field first.
+
+| # | Check | Pass when |
+|---|-------|-----------|
+| 1 | **Ctrl+V** | the field shows the *clipboard* URL |
+| 2 | **Right-click, Paste** | a menu with Cut, Copy, Paste, Select All opens, and Paste fills the field with the *clipboard* URL |
+| 3 | **Middle-click** on the field | the field shows the *PRIMARY* URL |
+| 4 | Right-click, Select All, then right-click, Copy | another application can paste the link |
+
+Record the result like this, one line per cell:
+
+```
+Wayland (sway 1.x)  Ctrl+V PASS | right-click Paste PASS | middle-click PASS | copy PASS
+X11 (no WM)         Ctrl+V PASS | right-click Paste PASS | middle-click PASS | copy PASS
+```
+
+Middle-click needs the compositor to offer a PRIMARY selection (`zwp_primary_selection` or data-control).
+Where it does not, the middle click pastes nothing and shows no error; that is not a failure of the app.
 
 ## Development
 

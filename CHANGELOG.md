@@ -3,6 +3,28 @@
 All notable changes to Pawchive Downloader are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-10-16
+
+### Fixed
+
+- **Pasting into the profile link field did nothing in the 0.1.0 AppImage.** Ctrl+V and the middle-click
+  paste read an empty private buffer instead of the system clipboard, because the clipboard support was
+  not compiled in. Ctrl+V, right-click and middle-click paste now work on Wayland and X11. (DAN-1600)
+
+### Added
+
+- **Right-click menu on the profile link field:** Cut, Copy, Paste and Select All.
+- **Middle-click pastes the PRIMARY selection** (the text you last selected anywhere) at the pointer, on
+  Wayland and X11, where the compositor offers one. Where it does not, nothing is pasted and nothing is shown.
+- **A release-testing checklist** in the README: the built AppImage is pasted into on Wayland and X11 with
+  each method before a release.
+
+### Known limitations
+
+- **Middle-click paste was tested on sway (wlroots, Wayland) and on X11 without a window manager, in
+  the AppImage on the build host and on Debian 12.** KDE Plasma and GNOME were not tried for it. A
+  compositor that offers no PRIMARY selection pastes nothing on middle-click and shows no error.
+
 ## [0.1.0] - 2026-10-16
 
 First release: a desktop app for downloading a creator's files from [Pawchive](https://pawchive.pw).
