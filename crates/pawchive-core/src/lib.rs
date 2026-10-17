@@ -10,6 +10,7 @@ pub mod engine;
 pub mod error;
 pub mod gate;
 pub mod http;
+pub mod links;
 pub mod model;
 pub mod names;
 pub mod plan;
