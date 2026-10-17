@@ -183,9 +183,14 @@ impl Fixture {
         let e2 = events.clone();
         let s = self
             .lib
-            .download_new(&self.engine(), &self.client.hosts, &self.creator, self.out_dir.path(), Control::new(), move |ev| {
-                e2.lock().unwrap().push(ev)
-            })
+            .download_new(
+                &self.engine(),
+                &self.client.hosts,
+                &self.creator,
+                self.out_dir.path(),
+                Control::new(),
+                move |ev| e2.lock().unwrap().push(ev),
+            )
             .await
             .unwrap();
         s
@@ -686,7 +691,11 @@ async fn a_failure_while_writing_rolls_the_whole_scan_back() {
     }
     let err = f.try_scan(ScanMode::Update).await.unwrap_err();
     assert!(err.to_string().contains("injected failure"), "{err}");
-    assert_eq!(f.snapshot(), before, "nothing from the failed scan survived, including the posts written before the failure");
+    assert_eq!(
+        f.snapshot(),
+        before,
+        "nothing from the failed scan survived, including the posts written before the failure"
+    );
 }
 
 // ---- the store -------------------------------------------------------------------------------

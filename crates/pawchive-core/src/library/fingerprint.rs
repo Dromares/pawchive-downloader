@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn edited_added_and_a_repeated_attachment_do_not_move_it() {
+    fn edited_and_added_do_not_move_it() {
         let base = fingerprint(&post(""));
         let mut p = post("");
         p.edited = Some("2026-01-01T00:00:00".into());

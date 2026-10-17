@@ -232,7 +232,7 @@ impl Library {
         let mut stmt = conn.prepare(PROFILE_SELECT_ALL)?;
         let rows = stmt.query_map([], profile_row)?;
         let mut out = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-        out.sort_by(|a, b| b.last_scanned_at.cmp(&a.last_scanned_at));
+        out.sort_by_key(|a| std::cmp::Reverse(a.last_scanned_at));
         Ok(out)
     }
 
@@ -573,5 +573,35 @@ fn write_post(tx: &Transaction<'_>, pid: i64, pw: &PostWrite, now: i64) -> Resul
 impl From<&Link> for LinkRecord {
     fn from(l: &Link) -> Self {
         LinkRecord { url: l.url.clone(), host: l.host.name(), downloadable: l.downloadable() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_hash_is_the_path_stem_when_it_is_a_sha256() {
+        let h = "4de5524e41ef3dfb7ea0d862720bf0f10e76744e7d9170d5ac73226078b0be88";
+        assert_eq!(hash_of_path(&format!("/4d/e5/{h}.jpg")), h);
+        assert_eq!(hash_of_path(&format!("/4d/e5/{}.JPG", h.to_uppercase())), h);
+        assert_eq!(hash_of_path("/4d/e5/not-a-hash.jpg"), "/4d/e5/not-a-hash.jpg");
+    }
+
+    #[test]
+    fn a_database_from_a_newer_version_is_refused_not_modified() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(DB_FILE);
+        Connection::open(&path).unwrap().execute_batch("PRAGMA user_version = 99;").unwrap();
+        let err = Library::open(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("schema version 99"), "{err}");
+    }
+
+    #[test]
+    fn the_default_folder_is_under_the_data_home() {
+        // Only the shape: the environment is shared between tests, so it is not changed here.
+        if let Some(d) = Library::default_data_dir() {
+            assert!(d.ends_with("pawchive-downloader"), "{}", d.display());
+        }
     }
 }

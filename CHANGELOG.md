@@ -7,6 +7,12 @@ All notable changes to Pawchive Downloader are recorded here. The format follows
 
 ### Added
 
+- **Saved library and incremental scan (engine only; no screen uses it yet).** `pawchive-core` can keep a
+  per-profile library in `$XDG_DATA_HOME/pawchive-downloader/library.sqlite3`: posts, files and external
+  links, with each post's `edited` time and a content fingerprint. An update scan asks the profile whether
+  anything changed (one request), reads the whole post list only when it did, and reports new, updated and
+  gone posts. "Download new only" skips files already downloaded (by hash) and never overwrites a file: a
+  replaced file is saved beside the old one under a new name.
 - **The window now has its own icon on X11.** The Pawchive icon is built into the program and set on the
   window, so the taskbar and Alt+Tab show it under X11 (and XWayland) even when the AppImage is not
   integrated with the desktop. This resolves the 0.1.0 known limitation "The window has no icon of its

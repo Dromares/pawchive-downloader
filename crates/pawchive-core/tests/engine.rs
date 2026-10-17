@@ -172,6 +172,55 @@ async fn a_size_mismatch_is_not_skipped_and_gets_replaced() {
 }
 
 #[tokio::test]
+async fn no_replace_mode_skips_an_existing_file_whatever_its_size() {
+    let m = serve(range_aware(body(2000))).await;
+    let dir = TempDir::new().unwrap();
+    let j = job(0, m.url("/x"), &dir, "m.bin", Some(2000));
+    std::fs::create_dir_all(j.dest.parent().unwrap()).unwrap();
+    std::fs::write(&j.dest, b"too short").unwrap();
+    let dest = j.dest.clone();
+    let (s, ev) = run(&engine(1, policy()).with_no_replace(), vec![j]).await;
+    assert_eq!((s.skipped, s.done, s.failed), (1, 0, 0));
+    assert!(ev.contains(&Event::Skipped { id: 0 }));
+    assert_eq!(std::fs::read(dest).unwrap(), b"too short", "the file is not replaced");
+    assert_eq!(m.count(), 0);
+}
+
+#[tokio::test]
+async fn no_replace_mode_never_overwrites_a_file_that_appears_during_the_transfer() {
+    let data = body(3000);
+    let m = serve(move |_, _| common::Resp::ok(&data).delayed(Duration::from_millis(300))).await;
+    let dir = TempDir::new().unwrap();
+    let j = job(0, m.url("/x"), &dir, "race.bin", None);
+    let dest = j.dest.clone();
+    let late = dest.clone();
+    // Someone saves a file at the destination while the request is in flight.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        std::fs::write(&late, b"arrived first").unwrap();
+    });
+    let (s, ev) = run(&engine(1, policy()).with_no_replace(), vec![j]).await;
+    assert_eq!((s.done, s.failed), (0, 1), "{ev:?}");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"arrived first");
+    assert!(ev
+        .iter()
+        .any(|e| matches!(e, Event::Failed { error, permanent: true, .. } if error.contains("not replacing"))));
+}
+
+#[tokio::test]
+async fn no_replace_mode_still_downloads_to_a_free_name() {
+    let data = body(1234);
+    let m = serve(range_aware(data.clone())).await;
+    let dir = TempDir::new().unwrap();
+    let j = job(0, m.url("/x"), &dir, "free.bin", None);
+    let dest = j.dest.clone();
+    let (s, _) = run(&engine(1, policy()).with_no_replace(), vec![j]).await;
+    assert_eq!(s.done, 1);
+    assert_eq!(std::fs::read(&dest).unwrap(), data);
+    assert!(!dest.with_extension("bin.part").exists(), "no .part file is left behind");
+}
+
+#[tokio::test]
 async fn backs_off_on_429_honouring_retry_after() {
     let data = body(3000);
     let d2 = data.clone();
