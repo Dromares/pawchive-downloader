@@ -30,6 +30,15 @@ pub fn comma(n: usize) -> String {
     out
 }
 
+/// `1` -> `"1 file"`, `4047` -> `"4,047 files"`.
+pub fn files(n: usize) -> String {
+    if n == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{} files", comma(n))
+    }
+}
+
 /// `74 s` -> `"1:14"`, `3725 s` -> `"1:02:05"`.
 pub fn clock(d: Duration) -> String {
     let s = d.as_secs();
@@ -86,6 +95,13 @@ mod tests {
         assert_eq!(post_label("undated_7_t"), "undated · t");
         assert_eq!(post_label("loose"), "loose");
         assert_eq!(post_label(""), "");
+    }
+
+    #[test]
+    fn file_counts_are_singular_for_one() {
+        assert_eq!(files(0), "0 files");
+        assert_eq!(files(1), "1 file");
+        assert_eq!(files(4047), "4,047 files");
     }
 
     #[test]

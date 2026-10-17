@@ -1057,4 +1057,92 @@ mod tests {
         );
         assert_eq!(download, seen.len() - 1, "bottom bar last: {seen:?}");
     }
+
+    // ---- DAN-1616: cool-down exit, silent Download, "1 files" ------------------------------------------
+
+    /// Every accessibility label/value drawn over three frames (the first carries the whole tree).
+    fn labels(ctx: &egui::Context, app: &mut App) -> Vec<String> {
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1120.0, 760.0))),
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(input, |ui| app.draw(ui));
+            if let Some(update) = o.platform_output.accesskit_update.take() {
+                out.extend(
+                    update.nodes.iter().filter_map(|(_, n)| n.label().or_else(|| n.value()).map(str::to_string)),
+                );
+            }
+            o.drop_without_applying_deltas();
+        }
+        out
+    }
+
+    /// F1: a Drive cool-down takes the toolbar's left slot, and Skip used to vanish with it, so a check
+    /// stuck behind a 429 could only be left by quitting.
+    #[test]
+    fn skip_stays_reachable_while_a_check_waits_out_a_cooldown() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = links_app(&ctx);
+        let now = Instant::now();
+        app.model.apply(UiEvent::CheckProgress { done: 0, total: 1 }, now);
+        app.model.apply(UiEvent::HostCooldown { host: pawchive_core::external::ExtHost::Drive, secs: 60 }, now);
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l.starts_with("Google Drive asked us to slow down")), "{seen:?}");
+        assert!(seen.iter().any(|l| l == "Skip"), "Skip must stay on screen during a cool-down: {seen:?}");
+    }
+
+    /// F2: Download pressed while picked links are still being checked shows why nothing is downloading
+    /// yet, and offers Cancel instead of a dead Download button.
+    #[test]
+    fn download_waiting_for_checks_says_so_in_the_bottom_bar() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = links_app(&ctx);
+        app.output = "/tmp/pawchive-awaiting".into();
+        let now = Instant::now();
+        app.model.apply(UiEvent::CheckProgress { done: 1, total: 3 }, now);
+        app.model.apply(UiEvent::DownloadWaiting, now);
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l.starts_with("Checking links before downloading · 1 of 3")), "{seen:?}");
+        assert!(seen.iter().any(|l| l == "Cancel"), "{seen:?}");
+        assert!(!seen.iter().any(|l| l.starts_with("Download ")), "no live Download button while waiting: {seen:?}");
+        // The wait ending without a download puts the Download button back.
+        app.model.apply(UiEvent::DownloadFinished(Default::default()), now);
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l.starts_with("Download ")), "{seen:?}");
+    }
+
+    /// F3: one file is "1 file", in the bottom bar as everywhere else.
+    #[test]
+    fn the_bottom_bar_says_1_file_not_1_files() {
+        use pawchive_core::creator::{CreatorRef, ScanTarget};
+        use pawchive_core::model::Service;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = links_app(&ctx);
+        app.output = "/tmp/pawchive-one-file".into();
+        let creator = CreatorRef { service: Service::Patreon, id: "1".into() };
+        let now = Instant::now();
+        app.model.apply(UiEvent::ScanStarted(ScanTarget { creator: creator.clone(), post_id: None }), now);
+        let file = pawchive_core::model::FileEntry {
+            post_id: "1".into(),
+            post_title: "t".into(),
+            post_published: None,
+            name: "a.jpg".into(),
+            path: "/a.jpg".into(),
+            preview_only: false,
+            node: None,
+            size: Some(1_200_000),
+            content_type: Some("image/jpeg".into()),
+            missing: false,
+        };
+        app.model.apply(UiEvent::ScanFinished { creator, posts: 1, files: vec![file], links: vec![], post: None }, now);
+        app.tab = Tab::Files;
+        let seen = labels(&ctx, &mut app);
+        assert!(seen.iter().any(|l| l.starts_with("1 file · ")), "{seen:?}");
+        assert!(!seen.iter().any(|l| l.contains("1 files")), "{seen:?}");
+    }
 }

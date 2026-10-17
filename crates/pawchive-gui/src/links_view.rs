@@ -290,6 +290,12 @@ impl App {
                         .color(p.warn))
                         .truncate(),
                     );
+                    // A cool-down can last a minute per retry: Skip stays reachable (spec 3, "always available").
+                    if self.model.checking.is_some()
+                        && ui.add(Button::new(RichText::new("Skip").size(T_SMALL)).small()).clicked()
+                    {
+                        acts.push(Action::SkipChecking);
+                    }
                 } else if let Some((done, total)) = self.model.checking {
                     ui.add(egui::Spinner::new().size(14.0).color(p.accent));
                     ui.add(egui::Label::new(dim(p, format!("Checking links · {done} of {total}"))).truncate());

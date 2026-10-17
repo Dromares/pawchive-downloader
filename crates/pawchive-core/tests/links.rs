@@ -737,3 +737,126 @@ fn mediafire_resolution_uses_the_signed_link_at_download_time_and_never_keeps_it
     let paths: Vec<String> = s.mock.hits().into_iter().map(|h| h.req.path).collect();
     assert_eq!(paths, ["/file/uikej85vz8b2h7z/Super_Girl.rar/file", MF_PATH]);
 }
+
+// ---- DAN-1616: a throttled host must not trap a check or a download -----------------------------
+
+/// A post with one Drive file, one Mediafire file and one image; Drive answers 429 to every download request.
+fn throttled_drive_site(rt: &tokio::runtime::Runtime) -> Mock {
+    let post = serde_json::json!({
+        "id": "9", "title": "Quota", "published": "2026-01-01T00:00:00",
+        "content": "<a href=\"https://drive.google.com/file/d/QUOTAFILE/view\">d</a>",
+        "file": {"name": "1.jpg", "path": "/aa/bb/1.jpg"}, "attachments": []
+    })
+    .to_string();
+    rt.block_on(serve(move |req, _| {
+        let p = req.path.as_str();
+        if p.starts_with("/api/v1/patreon/user/1/post/9") {
+            Resp::ok(post.as_bytes())
+        } else if p.starts_with("/data/") {
+            file_resp(req, &body_for("1.jpg"), "1.jpg", "image/jpeg")
+        } else if p.starts_with("/uc?") {
+            Resp::status(429)
+        } else {
+            Resp::status(404)
+        }
+    }))
+}
+
+/// The retry budget of a real run (5 tries), with only the pauses shortened.
+fn default_tries_session(base: &str) -> (SessionHandle, Receiver<UiEvent>) {
+    let retry = RetryPolicy { max_tries: 5, ..fast_policy() };
+    spawn(
+        Settings::default(),
+        hosts(base),
+        Tuning { retry, delay_override: Some(Duration::from_millis(1)) },
+        Arc::new(|| {}),
+    )
+}
+
+/// F1: a Drive 429 during `Check links` used to be retried for the full download budget (5 requests, a
+/// 60 s cool-down between each, about 4 minutes in a real run). A check gives up after one retry.
+#[test]
+fn a_throttled_check_gives_up_after_one_retry() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mock = throttled_drive_site(&rt);
+    let (handle, rx) = default_tries_session(&mock.base);
+    let scanned = scan(&handle, &rx, "https://pawchive.pw/patreon/user/1/post/9");
+    let dv = link_of(&scanned.links, Host::Drive).id;
+    handle.send(Command::CheckLinks { links: vec![dv] });
+    let failure = wait_for(&rx, |e| match e {
+        UiEvent::LinkCheckFailed { link, message } if link == dv => Some(message),
+        _ => None,
+    });
+    assert!(
+        failure.is_some_and(|m| m.contains("gave up after 2 tries")),
+        "a throttled check ends as a transient failure"
+    );
+    let uc = mock.hits().iter().filter(|h| h.req.path.starts_with("/uc?")).count();
+    assert_eq!(uc, external::CHECK_MAX_TRIES as usize, "one request, one retry after the cool-down");
+}
+
+/// F1: Skip during the cool-down ends the check at once, without waiting the cool-down out.
+#[test]
+fn skip_ends_a_check_that_is_waiting_out_a_cooldown() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mock = throttled_drive_site(&rt);
+    let retry = RetryPolicy { forbidden_pause: Duration::from_secs(30), ..fast_policy() };
+    let (handle, rx) = spawn(
+        Settings::default(),
+        hosts(&mock.base),
+        Tuning { retry, delay_override: Some(Duration::from_millis(1)) },
+        Arc::new(|| {}),
+    );
+    let scanned = scan(&handle, &rx, "https://pawchive.pw/patreon/user/1/post/9");
+    let dv = link_of(&scanned.links, Host::Drive).id;
+    handle.send(Command::CheckLinks { links: vec![dv] });
+    wait_for(&rx, |e| matches!(e, UiEvent::HostCooldown { .. }).then_some(()));
+    let t = std::time::Instant::now();
+    handle.send(Command::SkipChecking);
+    let message = wait_for(&rx, |e| match e {
+        UiEvent::LinkCheckFailed { link, message } if link == dv => Some(message),
+        _ => None,
+    });
+    assert_eq!(message, None, "skipped: back to Not checked, no failure note");
+    assert!(t.elapsed() < Duration::from_secs(5), "Skip must not wait out the 30 s cool-down: {:?}", t.elapsed());
+}
+
+/// F2: Download with a picked link that still has to be checked says so (`DownloadWaiting`) instead of
+/// sitting silent; when the check fails the rest of the selection still downloads, and the log names
+/// the link that was left out.
+#[test]
+fn download_waiting_for_a_throttled_check_says_so_and_then_goes_on() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mock = throttled_drive_site(&rt);
+    let (handle, rx) = start(&mock.base, Settings::default(), 1);
+    let scanned = scan(&handle, &rx, "https://pawchive.pw/patreon/user/1/post/9");
+    let dv = link_of(&scanned.links, Host::Drive).id;
+    let out = TempDir::new().unwrap();
+    handle.send(Command::StartDownload {
+        selection: Selection { categories: [Category::Image].into_iter().collect(), include_preview: false },
+        custom_extensions: String::new(),
+        output: out.path().to_path_buf(),
+        links: vec![LinkPick { link: dv, children: None }],
+    });
+    let mut seen = Vec::new();
+    let summary = wait_for(&rx, |e| match e {
+        UiEvent::DownloadWaiting => {
+            seen.push("waiting".to_string());
+            None
+        }
+        UiEvent::Log(m) if m.contains("left out") => {
+            seen.push(m);
+            None
+        }
+        UiEvent::DownloadStarted { .. } => {
+            seen.push("started".to_string());
+            None
+        }
+        UiEvent::DownloadFinished(s) => Some(s),
+        _ => None,
+    });
+    assert_eq!(seen.first().map(String::as_str), Some("waiting"), "the wait is announced first: {seen:?}");
+    assert!(seen.iter().any(|m| m.starts_with("1 picked link could not be checked")), "{seen:?}");
+    assert_eq!(seen.last().map(String::as_str), Some("started"), "{seen:?}");
+    assert_eq!((summary.done, summary.failed), (1, 0), "the image still downloaded: {summary:?}");
+}

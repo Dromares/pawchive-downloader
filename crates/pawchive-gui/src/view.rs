@@ -11,13 +11,14 @@ use eframe::egui::{
     Stroke, TextEdit, Ui,
 };
 use pawchive_core::classify::{Category, CustomExts};
+use pawchive_core::external::ExtHost;
 use pawchive_core::names::{creator_dir, post_dir};
 use pawchive_core::plan::JobOrigin;
 
 use crate::app::{Action, App, Filter, ReadyRow, Tab};
 use crate::derive::{self, TYPE_ROWS};
-use crate::format::{clock, comma, eta, hms_utc, human_size, last_component, post_label};
-use crate::state::{explain_failure, explain_scan_error, Level, Phase, Row, RowState, Sizing};
+use crate::format::{clock, comma, eta, files as files_word, hms_utc, human_size, last_component, post_label};
+use crate::state::{explain_failure, explain_scan_error, Level, Model, Phase, Row, RowState, Sizing};
 use crate::theme::*;
 use crate::widgets::{bar, card, dim, heading, indeterminate, num, primary, readout, secondary, Cols};
 
@@ -289,7 +290,7 @@ impl App {
         if !live && !CustomExts::parse(&self.custom_ext).is_empty() {
             let line = match summary.per_category.get(&Category::Custom) {
                 Some(s) if s.count > 0 => {
-                    format!("Matches {} files · {}", comma(s.count), size_label(s.bytes, s.unsized_files > 0))
+                    format!("Matches {} · {}", files_word(s.count), size_label(s.bytes, s.unsized_files > 0))
                 }
                 _ => "No files with these extensions.".to_string(),
             };
@@ -474,11 +475,10 @@ impl App {
                 let all = m.files.len();
                 let n_links = m.links.len();
                 let link_sel = crate::links_state::totals(&m.links).selected;
-                let files_word = |n: usize| if n == 1 { "1 file".to_string() } else { format!("{} files", comma(n)) };
                 let title = match &m.scan_post {
                     Some(post) => format!("Scan complete — post \u{201c}{}\u{201d}, {}", post.title, files_word(all)),
                     None if all == 0 => "Scan complete — no files found".to_string(),
-                    None => format!("Scan complete — {} posts, {} files", comma(m.posts), comma(all)),
+                    None => format!("Scan complete — {} posts, {}", comma(m.posts), files_word(all)),
                 };
                 let one_post = m.scan_post.is_some();
                 let mut line = format!("{} selected · {}", files_word(sel.files), size_label(sel.bytes, sel.partial));
@@ -911,10 +911,13 @@ impl App {
                     Phase::Empty => dim(p, "Paste a profile link to begin."),
                     Phase::Scanning => dim(p, "Scanning. Download unlocks when it finishes."),
                     Phase::ScanError => dim(p, "Nothing was saved. Scan again starts over."),
+                    Phase::Ready | Phase::Cancelled if m.awaiting_checks => {
+                        dim(p, awaiting_text(m, Instant::now())).size(T_BODY)
+                    }
                     Phase::Ready => match block {
                         Some(e) => dim(p, e).size(T_BODY),
                         None => {
-                            let mut s = format!("{} files · {}", comma(sel.files), size_label(sel.bytes, sel.partial));
+                            let mut s = format!("{} · {}", files_word(sel.files), size_label(sel.bytes, sel.partial));
                             if sel.thumbnails {
                                 s.push_str(" + thumbnails");
                             }
@@ -948,6 +951,11 @@ impl App {
                     Phase::ScanError => {
                         if primary(ui, p, "Scan again", PRIMARY_W, true).clicked() {
                             acts.push(Action::Scan);
+                        }
+                    }
+                    Phase::Ready | Phase::Cancelled if m.awaiting_checks => {
+                        if secondary(ui, "Cancel", 92.0, true).clicked() {
+                            acts.push(Action::Cancel);
                         }
                     }
                     Phase::Ready => {
@@ -1002,6 +1010,21 @@ impl App {
 }
 
 // ---- free drawing helpers ---------------------------------------------------------------------
+
+/// Bottom-bar line while Download waits for its picked links to be checked.
+fn awaiting_text(m: &Model, now: Instant) -> String {
+    let mut s = "Checking links before downloading".to_string();
+    if let Some((done, total)) = m.checking {
+        s.push_str(&format!(" · {done} of {total}"));
+    }
+    let cooling = [ExtHost::Drive, ExtHost::Mediafire]
+        .into_iter()
+        .find_map(|h| m.host_cooldown_secs(h, now).map(|secs| (h, secs)));
+    if let Some((host, secs)) = cooling {
+        s.push_str(&format!(" · {} asked us to slow down, resuming in {secs} s", host.name()));
+    }
+    s
+}
 
 fn size_cell(ui: &mut Ui, p: &Pal, live: bool, has: bool, bytes: u64, partial: bool, probing: bool) {
     if live {
