@@ -6,8 +6,8 @@ use reqwest::{Response, StatusCode};
 use serde_json::Value;
 
 use super::{
-    download_meta, is_html, location, read_text, Child, DeadReason, ExtClient, ExtHost, Notify, Resolved, ResolvedKind,
-    ResolveError,
+    download_meta, is_html, location, read_text, Child, DeadReason, ExtClient, ExtHost, Notify, ResolveError, Resolved,
+    ResolvedKind,
 };
 use crate::control::Control;
 use crate::links::{attr, decode_entities};
@@ -142,7 +142,9 @@ impl ConfirmForm {
 /// Read the "Google Drive can't scan this file for viruses" page. Every hidden field is submitted:
 /// `confirm=t` alone was seen working once and is not reliable (DAN-1610 addendum).
 pub fn parse_confirm_form(html: &str) -> Option<ConfirmForm> {
-    let at = html.find("id=\"download-form\"").or_else(|| html.find("name=\"confirm\"").and_then(|i| html[..i].rfind("<form")))?;
+    let at = html
+        .find("id=\"download-form\"")
+        .or_else(|| html.find("name=\"confirm\"").and_then(|i| html[..i].rfind("<form")))?;
     let start = html[..at].rfind("<form").unwrap_or(at);
     let end = html[start..].find("</form>").map_or(html.len(), |e| start + e);
     let form = &html[start..end];
@@ -164,7 +166,9 @@ pub fn parse_confirm_form(html: &str) -> Option<ConfirmForm> {
 
 fn page_says_quota(html: &str) -> bool {
     let l = html.to_ascii_lowercase();
-    l.contains("quota exceeded") || l.contains("too many users have viewed or downloaded") || l.contains("download quota")
+    l.contains("quota exceeded")
+        || l.contains("too many users have viewed or downloaded")
+        || l.contains("download quota")
 }
 
 fn page_says_private(html: &str) -> bool {
@@ -233,7 +237,12 @@ pub async fn open_file(
 
 /// Check a single Drive file: a one-byte ranged download request gives the real name (from
 /// `Content-Disposition`), the exact size and the Content-Type.
-pub async fn resolve_file(ext: &ExtClient, id: &str, control: &Control, notify: Notify<'_>) -> Result<Resolved, ResolveError> {
+pub async fn resolve_file(
+    ext: &ExtClient,
+    id: &str,
+    control: &Control,
+    notify: Notify<'_>,
+) -> Result<Resolved, ResolveError> {
     let resp = open_file(ext, id, Some("bytes=0-0".into()), control, notify).await?;
     let meta = download_meta(&resp);
     Ok(Resolved {
@@ -275,7 +284,12 @@ async fn folder_page(
 /// Check a Drive folder: read its page and every sub-folder's page. The children come out as the
 /// folder's own files first, then each sub-folder in listing order, each with its path below the
 /// shared folder. `partial` is set unless Drive's own end-of-list signal was seen (see [`PAGE_LIMIT`]).
-pub async fn resolve_folder(ext: &ExtClient, id: &str, control: &Control, notify: Notify<'_>) -> Result<Resolved, ResolveError> {
+pub async fn resolve_folder(
+    ext: &ExtClient,
+    id: &str,
+    control: &Control,
+    notify: Notify<'_>,
+) -> Result<Resolved, ResolveError> {
     let mut children: Vec<Child> = Vec::new();
     let mut partial = false;
     let mut root_name = None;
@@ -350,7 +364,8 @@ mod tests {
     fn the_example_folder_page_lists_two_files_and_four_subfolders() {
         let html = fixture("drive-folder-14tXDG5k.html");
         let entries = parse_folder_page(&html).unwrap();
-        let names: Vec<(&str, bool, Option<u64>)> = entries.iter().map(|e| (e.name.as_str(), e.is_folder(), e.size)).collect();
+        let names: Vec<(&str, bool, Option<u64>)> =
+            entries.iter().map(|e| (e.name.as_str(), e.is_folder(), e.size)).collect();
         assert_eq!(
             names,
             [

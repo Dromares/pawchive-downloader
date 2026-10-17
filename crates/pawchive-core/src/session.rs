@@ -16,7 +16,7 @@ use crate::cookies::CookieJar;
 use crate::creator::{parse_scan_url, CreatorRef, ScanTarget};
 use crate::engine::{self, Engine, EngineConfig, Job};
 use crate::error::Error;
-use crate::external::{self, DeadReason, ExtClient, ExtHost, Notice, Resolved, ResolveError};
+use crate::external::{self, DeadReason, ExtClient, ExtHost, Notice, ResolveError, Resolved};
 use crate::gate::Gate;
 use crate::http::{Http, RetryPolicy};
 use crate::links::{Link, PostRef};
@@ -654,7 +654,7 @@ impl Session {
 
     /// Drop the checks that have not started; each row goes back to "Not checked".
     fn drain_check_queue(&mut self) {
-        for (_, q) in self.check_queue.iter_mut() {
+        for q in self.check_queue.values_mut() {
             for id in q.drain(..) {
                 self.check_queued.remove(&id);
                 self.check_total = self.check_total.saturating_sub(1);

@@ -438,8 +438,12 @@ impl Engine {
                 Ok((direct, _)) => {
                     let extra: Vec<(&str, String)> = range.map(|r| (RANGE.as_str(), r)).into_iter().collect();
                     match ext.get(host, control, &notify, &direct, &extra).await {
-                        Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => Err(ResolveError::Dead(external::DeadReason::Removed)),
-                        Ok(r) if external::is_html(&r) => Err(ResolveError::transient("Mediafire sent a web page instead of the file")),
+                        Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
+                            Err(ResolveError::Dead(external::DeadReason::Removed))
+                        }
+                        Ok(r) if external::is_html(&r) => {
+                            Err(ResolveError::transient("Mediafire sent a web page instead of the file"))
+                        }
                         Ok(r) => Ok(r),
                         Err(e) => Err(e.into()),
                     }

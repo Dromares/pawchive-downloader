@@ -159,7 +159,10 @@ pub enum ResolveError {
     /// Permanent: the link has nothing to download.
     Dead(DeadReason),
     /// Worth trying again later. `quota` marks a download-limit / throttling answer.
-    Transient { message: String, quota: bool },
+    Transient {
+        message: String,
+        quota: bool,
+    },
     Cancelled,
 }
 
@@ -369,7 +372,10 @@ mod tests {
 
     #[test]
     fn content_disposition_names() {
-        assert_eq!(content_disposition_name(r#"attachment; filename="Super Girl.rar""#).as_deref(), Some("Super Girl.rar"));
+        assert_eq!(
+            content_disposition_name(r#"attachment; filename="Super Girl.rar""#).as_deref(),
+            Some("Super Girl.rar")
+        );
         assert_eq!(
             content_disposition_name(r#"attachment; filename="x.bin"; filename*=UTF-8''%E3%81%82.zip"#).as_deref(),
             Some("あ.zip")
@@ -381,7 +387,9 @@ mod tests {
 
     #[test]
     fn dead_reasons_fit_the_row() {
-        for r in [DeadReason::Removed, DeadReason::Private, DeadReason::Password, DeadReason::Invalid, DeadReason::Empty] {
+        for r in
+            [DeadReason::Removed, DeadReason::Private, DeadReason::Password, DeadReason::Invalid, DeadReason::Empty]
+        {
             for h in [ExtHost::Drive, ExtHost::Mediafire] {
                 assert!(r.text(h).chars().count() <= 38, "{}", r.text(h));
             }

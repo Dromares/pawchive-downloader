@@ -192,10 +192,7 @@ mod tests {
         assert_eq!(h.full_url("/4d/e5/x.jpg"), "https://file.pawchive.pw/data/4d/e5/x.jpg");
         assert_eq!(h.thumb_url("/4d/e5/x.jpg"), "https://img.pawchive.pw/thumbnail/data/4d/e5/x.jpg");
         assert_eq!(h.full_url("4d/x"), "https://file.pawchive.pw/data/4d/x");
-        assert_eq!(
-            h.post_url(&c, "172435214"),
-            "https://pawchive.pw/api/v1/patreon/user/30500811/post/172435214"
-        );
+        assert_eq!(h.post_url(&c, "172435214"), "https://pawchive.pw/api/v1/patreon/user/30500811/post/172435214");
         assert_eq!(h.external_url("https://drive.google.com/uc?id=1&x=2"), "https://drive.google.com/uc?id=1&x=2");
         let t = Hosts { external: Some("http://127.0.0.1:9/".into()), ..Hosts::default() };
         assert_eq!(t.external_url("https://drive.google.com/uc?id=1&x=2#f"), "http://127.0.0.1:9/uc?id=1&x=2");

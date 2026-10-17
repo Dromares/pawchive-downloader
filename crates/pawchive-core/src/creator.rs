@@ -48,7 +48,9 @@ pub fn parse_scan_url(input: &str) -> Result<ScanTarget> {
                 return Err(Error::BadUrl(format!("\"{id}\" is not a valid creator id")));
             }
             let post_id = match rest {
-                ["post", pid, ..] if !pid.is_empty() && pid.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') => {
+                ["post", pid, ..]
+                    if !pid.is_empty() && pid.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') =>
+                {
                     Some((*pid).to_string())
                 }
                 _ => None,

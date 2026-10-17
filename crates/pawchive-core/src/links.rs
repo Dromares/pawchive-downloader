@@ -221,8 +221,8 @@ pub fn extract_urls(body: &str) -> Vec<String> {
     let bytes = body.as_bytes();
     let (mut i, mut text_from) = (0, 0);
     while i < bytes.len() {
-        let is_tag = bytes[i] == b'<'
-            && bytes.get(i + 1).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'/' || *c == b'!');
+        let is_tag =
+            bytes[i] == b'<' && bytes.get(i + 1).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'/' || *c == b'!');
         if !is_tag {
             i += 1;
             continue;
@@ -288,8 +288,10 @@ pub fn classify_url(raw: &str) -> Option<(Host, LinkKind, Option<String>, String
         return None;
     }
     let host = Host::from_domain(&domain);
-    let segs: Vec<String> = url.path_segments().map(|s| s.filter(|x| !x.is_empty()).map(percent_decode).collect()).unwrap_or_default();
-    let query = |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned()).filter(|v| !v.is_empty());
+    let segs: Vec<String> =
+        url.path_segments().map(|s| s.filter(|x| !x.is_empty()).map(percent_decode).collect()).unwrap_or_default();
+    let query =
+        |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned()).filter(|v| !v.is_empty());
     let unsupported = |why: String, key: String| (host.clone(), LinkKind::Unsupported { why }, None, key);
     let generic_key = || {
         let mut u = url.clone();
@@ -384,7 +386,14 @@ pub fn collect(posts: &[Post]) -> Vec<Link> {
                 }
                 None => {
                     by_key.insert(key, links.len());
-                    links.push(Link { id: links.len(), url: u.trim().to_string(), host, kind, name_hint, posts: vec![pref] });
+                    links.push(Link {
+                        id: links.len(),
+                        url: u.trim().to_string(),
+                        host,
+                        kind,
+                        name_hint,
+                        posts: vec![pref],
+                    });
                 }
             }
         }
@@ -474,10 +483,14 @@ mod tests {
         assert_eq!(hint.as_deref(), Some("Super_Girl.rar"));
         assert_eq!(key, "mf:uikej85vz8b2h7z");
         assert!(matches!(k, LinkKind::MediafireFile { ref key, .. } if key == "uikej85vz8b2h7z"));
-        assert!(matches!(c("https://drive.google.com/drive/u/0/folders/F1?usp=sharing").1, LinkKind::DriveFolder { id } if id == "F1"));
+        assert!(
+            matches!(c("https://drive.google.com/drive/u/0/folders/F1?usp=sharing").1, LinkKind::DriveFolder { id } if id == "F1")
+        );
         assert!(matches!(c("https://drive.google.com/file/d/F2/view").1, LinkKind::DriveFile { id } if id == "F2"));
         assert!(matches!(c("https://drive.google.com/open?id=F3").1, LinkKind::DriveFile { id } if id == "F3"));
-        assert!(matches!(c("https://drive.google.com/uc?export=download&id=F4").1, LinkKind::DriveFile { id } if id == "F4"));
+        assert!(
+            matches!(c("https://drive.google.com/uc?export=download&id=F4").1, LinkKind::DriveFile { id } if id == "F4")
+        );
         assert_eq!(c("https://drive.google.com/uc?id=F4").3, c("https://drive.google.com/file/d/F4/view").3);
         assert_eq!(c("https://mega.nz/file/abc#key").0.name(), "Mega");
         let (h, k, hint, _) = c("https://www.dropbox.com/s/xyz/Bonus_Wallpapers.zip?dl=0");
@@ -492,7 +505,13 @@ mod tests {
         assert_eq!(hint.as_deref(), Some("Super Girl.rar"));
         assert!(matches!(k, LinkKind::MediafireFile { page_url, .. } if !page_url.contains("TOKEN")));
         // Not external.
-        for u in ["https://pawchive.pw/patreon/user/1", "https://file.pawchive.pw/data/x.jpg", "mailto:a@b.c", "/relative", "ftp://x.test/a"] {
+        for u in [
+            "https://pawchive.pw/patreon/user/1",
+            "https://file.pawchive.pw/data/x.jpg",
+            "mailto:a@b.c",
+            "/relative",
+            "ftp://x.test/a",
+        ] {
             assert!(classify_url(u).is_none(), "{u}");
         }
     }
@@ -500,7 +519,8 @@ mod tests {
     #[test]
     fn same_link_in_many_posts_is_one_row_with_newest_post_first() {
         let u = r#"<a href="https://drive.google.com/drive/folders/F1">d</a>"#;
-        let posts = [post("3", "2026-03-01", u), post("1", "2026-01-01", u), post("2", "2026-02-01", &format!("{u}{u}"))];
+        let posts =
+            [post("3", "2026-03-01", u), post("1", "2026-01-01", u), post("2", "2026-02-01", &format!("{u}{u}"))];
         let links = collect(&posts);
         assert_eq!(links.len(), 1);
         let ids: Vec<&str> = links[0].posts.iter().map(|p| p.id.as_str()).collect();
@@ -513,15 +533,36 @@ mod tests {
     fn display_order_is_downloadable_first_then_unsupported_grouped_by_host() {
         let body = |urls: &[&str]| urls.iter().map(|u| format!(r#"<a href="{u}">x</a>"#)).collect::<String>();
         let posts = [
-            post("4", "2026-04-04", &body(&["https://mega.nz/file/1", "https://patreon.com/a", "https://www.mediafire.com/file/k1/a.zip/file"])),
-            post("3", "2026-03-03", &body(&["https://patreon.com/b", "https://ko-fi.com/c", "https://drive.google.com/drive/folders/F1"])),
+            post(
+                "4",
+                "2026-04-04",
+                &body(&[
+                    "https://mega.nz/file/1",
+                    "https://patreon.com/a",
+                    "https://www.mediafire.com/file/k1/a.zip/file",
+                ]),
+            ),
+            post(
+                "3",
+                "2026-03-03",
+                &body(&["https://patreon.com/b", "https://ko-fi.com/c", "https://drive.google.com/drive/folders/F1"]),
+            ),
             post("2", "2026-02-02", &body(&["https://patreon.com/c", "https://mega.nz/file/2"])),
         ];
         let links = collect(&posts);
         let order: Vec<String> = links.iter().map(|l| format!("{}:{}", l.id, l.host.name())).collect();
         assert_eq!(
             order,
-            ["0:Mediafire", "1:Google Drive", "2:patreon.com", "3:patreon.com", "4:patreon.com", "5:Mega", "6:Mega", "7:ko-fi.com"]
+            [
+                "0:Mediafire",
+                "1:Google Drive",
+                "2:patreon.com",
+                "3:patreon.com",
+                "4:patreon.com",
+                "5:Mega",
+                "6:Mega",
+                "7:ko-fi.com"
+            ]
         );
     }
 
@@ -537,7 +578,8 @@ mod tests {
     /// The example post of DAN-1609: the `1.jpg` attachment, a Drive folder and a Mediafire file.
     #[test]
     fn example_post_yields_the_image_and_both_links_labelled() {
-        let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/links/post-162546844.api.json")).unwrap();
+        let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/links/post-162546844.api.json"))
+            .unwrap();
         let post = parse_post(&bytes).unwrap();
         let files = post.files();
         assert_eq!(files.len(), 1);
@@ -545,7 +587,10 @@ mod tests {
         let links = collect(&[post]);
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].host.name(), "Google Drive");
-        assert_eq!(links[0].url, "https://drive.google.com/drive/folders/14tXDG5kTah5Vkbn3Pp2Z68rcCTUrRMaQ?usp=sharing");
+        assert_eq!(
+            links[0].url,
+            "https://drive.google.com/drive/folders/14tXDG5kTah5Vkbn3Pp2Z68rcCTUrRMaQ?usp=sharing"
+        );
         assert!(matches!(&links[0].kind, LinkKind::DriveFolder { id } if id == "14tXDG5kTah5Vkbn3Pp2Z68rcCTUrRMaQ"));
         assert_eq!(links[1].host.name(), "Mediafire");
         assert_eq!(links[1].name_hint.as_deref(), Some("Super_Girl.rar"));
@@ -554,7 +599,11 @@ mod tests {
 
     #[test]
     fn creator_listing_page_carries_links_too() {
-        let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/links/creator-5163822.list-o0.api.json")).unwrap();
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/links/creator-5163822.list-o0.api.json"
+        ))
+        .unwrap();
         let posts = crate::model::parse_posts(&bytes).unwrap();
         assert_eq!(posts.len(), 50);
         let links = collect(&posts);

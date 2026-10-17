@@ -75,7 +75,12 @@ fn client(mock_base: &str) -> Client {
     Client {
         http: Http::new(&Settings::default(), None).unwrap(),
         gate: Gate::new(Duration::from_millis(1)),
-        hosts: Hosts { api: mock_base.to_string(), file: mock_base.to_string(), thumb: mock_base.to_string(), external: None },
+        hosts: Hosts {
+            api: mock_base.to_string(),
+            file: mock_base.to_string(),
+            thumb: mock_base.to_string(),
+            external: None,
+        },
         policy: RetryPolicy { max_tries: 2, base: Duration::from_millis(5), ..Default::default() },
     }
 }

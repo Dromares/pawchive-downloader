@@ -6,8 +6,8 @@ use reqwest::header::RANGE;
 use reqwest::StatusCode;
 
 use super::{
-    download_meta, is_html, location, percent_decode, read_text, DeadReason, ExtClient,
-    ExtHost, Notify, Resolved, ResolvedKind, ResolveError,
+    download_meta, is_html, location, percent_decode, read_text, DeadReason, ExtClient, ExtHost, Notify, ResolveError,
+    Resolved, ResolvedKind,
 };
 use crate::control::Control;
 use crate::links::{attr, decode_entities};
@@ -111,11 +111,8 @@ pub async fn resolve(
         return Err(ResolveError::transient(format!("Mediafire's download link answered HTTP {}", status.as_u16())));
     }
     let meta = download_meta(&resp);
-    let name = meta
-        .name
-        .or(page_name)
-        .or_else(|| hint.map(str::to_string))
-        .unwrap_or_else(|| "Mediafire file".to_string());
+    let name =
+        meta.name.or(page_name).or_else(|| hint.map(str::to_string)).unwrap_or_else(|| "Mediafire file".to_string());
     Ok(Resolved { name, size: meta.size, content_type: meta.content_type, kind: ResolvedKind::File })
 }
 
@@ -131,7 +128,10 @@ mod tests {
     fn example_file_page_gives_the_direct_link_and_the_name() {
         match parse_file_page(&fixture("mediafire-uikej85vz8b2h7z.file-page.html")) {
             Page::Direct { url, name } => {
-                assert_eq!(url, "https://download1980.mediafire.com/REDACTED_SIGNED_TOKEN/uikej85vz8b2h7z/Super+Girl.rar");
+                assert_eq!(
+                    url,
+                    "https://download1980.mediafire.com/REDACTED_SIGNED_TOKEN/uikej85vz8b2h7z/Super+Girl.rar"
+                );
                 assert_eq!(name.as_deref(), Some("Super Girl.rar"));
             }
             other => panic!("{other:?}"),
@@ -150,6 +150,9 @@ mod tests {
     fn error_pages_map_to_reasons() {
         assert_eq!(dead_from_error_location("/error.php?errno=320&origin=download"), DeadReason::Removed);
         assert_eq!(dead_from_error_location("/error.php?errno=999"), DeadReason::Invalid);
-        assert_eq!(name_from_url("https://d.mediafire.com/T/k/Super+Girl%20(1).rar?x=1").as_deref(), Some("Super Girl (1).rar"));
+        assert_eq!(
+            name_from_url("https://d.mediafire.com/T/k/Super+Girl%20(1).rar?x=1").as_deref(),
+            Some("Super Girl (1).rar")
+        );
     }
 }

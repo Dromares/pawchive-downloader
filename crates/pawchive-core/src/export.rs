@@ -188,6 +188,9 @@ mod tests {
     #[test]
     fn default_names() {
         assert_eq!(default_file_name("patreon", "5163822", None, "csv"), "patreon_5163822-links.csv");
-        assert_eq!(default_file_name("patreon", "5163822", Some("162546844"), "txt"), "patreon_5163822_post-162546844-links.txt");
+        assert_eq!(
+            default_file_name("patreon", "5163822", Some("162546844"), "txt"),
+            "patreon_5163822_post-162546844-links.txt"
+        );
     }
 }

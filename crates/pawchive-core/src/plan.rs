@@ -129,9 +129,7 @@ fn post_names<'a>(
     published: Option<&str>,
     title: &str,
 ) -> &'a mut (String, NameAllocator) {
-    per_post
-        .entry(post_id.to_string())
-        .or_insert_with(|| (post_dir(published, post_id, title), NameAllocator::new()))
+    per_post.entry(post_id.to_string()).or_insert_with(|| (post_dir(published, post_id, title), NameAllocator::new()))
 }
 
 /// Build jobs for the selected files. Names are allocated over *all* of a post's files, selected
@@ -217,7 +215,14 @@ fn plan_links(root: &Path, per_post: &mut PostNames, out: &mut Vec<Planned>, lp:
         let base = root.join(&*post_dir);
         let mut push = |dest: std::path::PathBuf, label: String, size: Option<u64>, ext: ExtSource, child, renamed| {
             out.push(Planned {
-                job: Job { id: out.len() as u64, url: link.url.clone(), dest, expected_size: size, label, ext: Some(ext) },
+                job: Job {
+                    id: out.len() as u64,
+                    url: link.url.clone(),
+                    dest,
+                    expected_size: size,
+                    label,
+                    ext: Some(ext),
+                },
                 origin: JobOrigin::Link { link: link.id, child },
                 renamed,
             });
@@ -245,7 +250,14 @@ fn plan_links(root: &Path, per_post: &mut PostNames, out: &mut Vec<Planned>, lp:
                     let wanted = sanitize_component(&child.name, MAX_COMPONENT_BYTES);
                     let leaf = dir_names.entry(dir.clone()).or_default().allocate(&wanted);
                     let rel = dir.strip_prefix(&base).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-                    push(dir.join(&leaf), format!("{post_dir}/{rel}/{leaf}"), child.size, ext, Some(ci), leaf != wanted);
+                    push(
+                        dir.join(&leaf),
+                        format!("{post_dir}/{rel}/{leaf}"),
+                        child.size,
+                        ext,
+                        Some(ci),
+                        leaf != wanted,
+                    );
                 }
             }
         }
