@@ -26,20 +26,33 @@ use pawchive_core::settings::Settings;
 /// `.desktop` file (`StartupWMClass`), which is what lets a compositor find the icon and group windows.
 const APP_ID: &str = "pawchive-downloader";
 
+/// The 256 px icon from the desktop-entry set, compiled in so the window has its own icon even when
+/// the AppImage is not integrated and no `.desktop` file is installed (DAN-1596). winit 0.30 applies it
+/// on X11 only: its Wayland `set_window_icon` is a no-op, so a Wayland window gets its icon from the
+/// desktop entry matched on `APP_ID`.
+const ICON_PNG: &[u8] = include_bytes!("../assets/pawchive-downloader-256.png");
+
+/// The window icon, decoded from [`ICON_PNG`]. `None` if the PNG will not decode: a missing icon must
+/// not stop the app from starting.
+fn window_icon() -> Option<egui::IconData> {
+    eframe::icon_data::from_png_bytes(ICON_PNG).ok()
+}
+
 fn main() -> eframe::Result {
     let settings = Settings::load();
     let mut hosts = Hosts::default();
     if let Some(base) = dev::base_url_override() {
         hosts = Hosts { api: base.clone(), file: base.clone(), thumb: base.clone(), external: Some(base) };
     }
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Pawchive Downloader")
-            .with_app_id(APP_ID)
-            .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([900.0, 600.0]),
-        ..Default::default()
-    };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Pawchive Downloader")
+        .with_app_id(APP_ID)
+        .with_inner_size([1120.0, 760.0])
+        .with_min_inner_size([900.0, 600.0]);
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "Pawchive Downloader",
         options,
@@ -50,4 +63,18 @@ fn main() -> eframe::Result {
             Ok(Box::new(app::App::new(cc, settings, handle, rx)))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_icon_decodes_to_a_non_empty_rgba_image() {
+        let icon = window_icon().expect("the embedded icon PNG decodes");
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+        assert!(icon.rgba.iter().skip(3).step_by(4).any(|&a| a != 0), "icon is fully transparent");
+        assert!(icon.rgba.iter().any(|&b| b != 0), "icon is all zero");
+    }
 }

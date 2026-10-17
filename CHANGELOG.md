@@ -3,6 +3,22 @@
 All notable changes to Pawchive Downloader are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **The window now has its own icon on X11.** The Pawchive icon is built into the program and set on the
+  window, so the taskbar and Alt+Tab show it under X11 (and XWayland) even when the AppImage is not
+  integrated with the desktop. This resolves the 0.1.0 known limitation "The window has no icon of its
+  own yet" for X11.
+
+### Known limitations
+
+- **A native Wayland window still shows the desktop's default icon until the AppImage is integrated.**
+  The graphics library this version uses (winit 0.30) cannot set a window icon on Wayland; Wayland
+  desktops take it from the desktop entry, which an unintegrated AppImage does not install (for example
+  with AppImageLauncher it appears).
+
 ## [0.2.0] - 2026-10-17
 
 ### Added
