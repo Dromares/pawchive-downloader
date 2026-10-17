@@ -340,7 +340,7 @@ pub fn download_meta(resp: &Response) -> DownloadMeta {
     DownloadMeta { name, size, content_type }
 }
 
-pub(crate) fn is_html(resp: &Response) -> bool {
+pub fn is_html(resp: &Response) -> bool {
     resp.headers()
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())

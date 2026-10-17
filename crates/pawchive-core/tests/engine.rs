@@ -34,7 +34,7 @@ fn engine(concurrency: usize, retry: RetryPolicy) -> Engine {
 }
 
 fn job(id: u64, url: String, dir: &TempDir, name: &str, expected: Option<u64>) -> Job {
-    Job { id, url, dest: dir.path().join("post").join(name), expected_size: expected, label: name.into() }
+    Job { id, url, dest: dir.path().join("post").join(name), expected_size: expected, label: name.into(), ext: None }
 }
 
 type Log = Arc<Mutex<Vec<Event>>>;

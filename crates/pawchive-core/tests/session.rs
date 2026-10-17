@@ -120,6 +120,7 @@ fn scan_size_and_download_end_to_end() {
         selection: Selection { categories: Category::ALL.into_iter().collect(), include_preview: false },
         custom_extensions: String::new(),
         output: out.path().to_path_buf(),
+        links: vec![],
     });
     let summary = wait_for(&rx, |e| match e {
         UiEvent::DownloadFinished(s) => Some(s),
@@ -146,6 +147,7 @@ fn scan_size_and_download_end_to_end() {
         selection: Selection { categories: Category::ALL.into_iter().collect(), include_preview: false },
         custom_extensions: String::new(),
         output: out.path().to_path_buf(),
+        links: vec![],
     });
     let summary = wait_for(&rx, |e| match e {
         UiEvent::DownloadFinished(s) => Some(s),
@@ -201,6 +203,7 @@ fn files_that_404_when_sized_are_not_offered_for_download() {
         selection: Selection { categories: Category::ALL.into_iter().collect(), include_preview: false },
         custom_extensions: String::new(),
         output: out.path().to_path_buf(),
+        links: vec![],
     });
     // Files the server said are gone must not become download jobs: nothing is started at all.
     let started = wait_for(&rx, |e| match e {
@@ -246,6 +249,7 @@ fn missing_images_are_offered_as_thumbnails_and_never_retried() {
             selection: Selection { categories: Category::ALL.into_iter().collect(), include_preview },
             custom_extensions: String::new(),
             output: out.path().to_path_buf(),
+            links: vec![],
         })
     };
     // Preview only unticked (the default): nothing is queued, images included.
@@ -330,6 +334,7 @@ fn skip_sizing_stops_the_probes_and_downloads_still_work() {
         selection: Selection { categories: Category::ALL.into_iter().collect(), include_preview: false },
         custom_extensions: String::new(),
         output: out.path().to_path_buf(),
+        links: vec![],
     });
     let s = wait_for(&rx, |e| match e {
         UiEvent::DownloadFinished(s) => Some(s),
@@ -391,6 +396,7 @@ fn failing_download(
         selection: Selection { categories: Category::ALL.into_iter().collect(), include_preview: false },
         custom_extensions: String::new(),
         output: out.to_path_buf(),
+        links: vec![],
     });
     let mut failed = vec![];
     wait_for(rx, |e| match e {
@@ -584,6 +590,7 @@ fn press_download_mid_sizing(p: &Pressure, gone: &[usize], gone_probe: &[usize])
         selection: Selection { categories: Category::ALL.into_iter().collect(), include_preview: false },
         custom_extensions: String::new(),
         output: out.path().to_path_buf(),
+        links: vec![],
     });
 
     let mut r = Pressed {

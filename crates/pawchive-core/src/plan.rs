@@ -7,7 +7,9 @@ use std::path::Path;
 use crate::api::Hosts;
 use crate::classify::{classify, Category, CustomExts};
 use crate::creator::CreatorRef;
-use crate::engine::Job;
+use crate::engine::{ExtSource, Job};
+use crate::external::{Resolved, ResolvedKind};
+use crate::links::{Link, LinkKind};
 use crate::model::FileEntry;
 use crate::names::{creator_dir, post_dir, sanitize_component, thumb_name, NameAllocator, MAX_COMPONENT_BYTES};
 
@@ -89,6 +91,49 @@ pub struct Selection {
     pub include_preview: bool,
 }
 
+/// Where a job came from: a file on Pawchive, or a file of an external link (`child` is the index
+/// into a folder's children).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobOrigin {
+    Pawchive,
+    Link { link: usize, child: Option<usize> },
+}
+
+/// The user's pick of external files: one link, or some (`Some`) or all (`None`) files of a folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkPick {
+    pub link: usize,
+    pub children: Option<Vec<usize>>,
+}
+
+/// What the planner needs to know about the external links.
+pub struct LinkPlan<'a> {
+    pub links: &'a [Link],
+    pub resolved: &'a HashMap<usize, Resolved>,
+    pub picks: &'a [LinkPick],
+}
+
+#[derive(Clone, Debug)]
+pub struct Planned {
+    pub job: Job,
+    pub origin: JobOrigin,
+    /// The leaf had to be changed to avoid a clash (`4 (2).png`), so the UI says `Saved as …`.
+    pub renamed: bool,
+}
+
+type PostNames = HashMap<String, (String, NameAllocator)>;
+
+fn post_names<'a>(
+    per_post: &'a mut PostNames,
+    post_id: &str,
+    published: Option<&str>,
+    title: &str,
+) -> &'a mut (String, NameAllocator) {
+    per_post
+        .entry(post_id.to_string())
+        .or_insert_with(|| (post_dir(published, post_id, title), NameAllocator::new()))
+}
+
 /// Build jobs for the selected files. Names are allocated over *all* of a post's files, selected
 /// or not, so a file keeps the same name (and skip-existing keeps working) when the selection
 /// changes between runs.
@@ -100,13 +145,26 @@ pub fn plan_downloads(
     output: &Path,
     hosts: &Hosts,
 ) -> Vec<Job> {
+    plan_all(creator, files, sel, custom, output, hosts, None).into_iter().map(|p| p.job).collect()
+}
+
+/// Pawchive files first (as [`plan_downloads`]), then the picked external files. Their names are
+/// allocated after every Pawchive name of the same post, so a clash renames the external file and
+/// the Pawchive file keeps its name.
+pub fn plan_all(
+    creator: &CreatorRef,
+    files: &[FileEntry],
+    sel: &Selection,
+    custom: &CustomExts,
+    output: &Path,
+    hosts: &Hosts,
+    links: Option<LinkPlan<'_>>,
+) -> Vec<Planned> {
     let root = output.join(creator_dir(creator.service.as_str(), &creator.id));
-    let mut per_post: HashMap<&str, (String, NameAllocator)> = HashMap::new();
-    let mut jobs = Vec::new();
+    let mut per_post: PostNames = HashMap::new();
+    let mut out: Vec<Planned> = Vec::new();
     for f in files {
-        let (dir, alloc) = per_post.entry(f.post_id.as_str()).or_insert_with(|| {
-            (post_dir(f.post_published.as_deref(), &f.post_id, &f.post_title), NameAllocator::new())
-        });
+        let (dir, alloc) = post_names(&mut per_post, &f.post_id, f.post_published.as_deref(), &f.post_title);
         let thumb = thumbnail_only(f);
         let mut name = sanitize_component(&f.name, MAX_COMPONENT_BYTES);
         if thumb {
@@ -121,15 +179,77 @@ pub fn plan_downloads(
             continue;
         }
         let dest = root.join(&*dir).join(&name);
-        jobs.push(Job {
-            id: jobs.len() as u64,
-            url: if thumb { hosts.thumb_url(&f.path) } else { hosts.full_url(&f.path) },
-            dest,
-            expected_size: if thumb { None } else { f.size },
-            label: format!("{dir}/{name}"),
+        out.push(Planned {
+            job: Job {
+                id: out.len() as u64,
+                url: if thumb { hosts.thumb_url(&f.path) } else { hosts.full_url(&f.path) },
+                dest,
+                expected_size: if thumb { None } else { f.size },
+                label: format!("{dir}/{name}"),
+                ext: None,
+            },
+            origin: JobOrigin::Pawchive,
+            renamed: false,
         });
     }
-    jobs
+    if let Some(lp) = links {
+        plan_links(&root, &mut per_post, &mut out, lp);
+    }
+    out
+}
+
+fn ext_source(link: &Link, child: Option<&crate::external::Child>) -> Option<ExtSource> {
+    match (&link.kind, child) {
+        (LinkKind::MediafireFile { page_url, .. }, _) => Some(ExtSource::Mediafire { page_url: page_url.clone() }),
+        (LinkKind::DriveFile { id }, _) => Some(ExtSource::Drive { file_id: id.clone() }),
+        (LinkKind::DriveFolder { .. }, Some(c)) => Some(ExtSource::Drive { file_id: c.id.clone() }),
+        _ => None,
+    }
+}
+
+fn plan_links(root: &Path, per_post: &mut PostNames, out: &mut Vec<Planned>, lp: LinkPlan<'_>) {
+    // Names inside a Drive folder are unique per directory, case-insensitively.
+    let mut dir_names: HashMap<std::path::PathBuf, NameAllocator> = HashMap::new();
+    for pick in lp.picks {
+        let (Some(link), Some(res)) = (lp.links.get(pick.link), lp.resolved.get(&pick.link)) else { continue };
+        let src = link.source();
+        let (post_dir, alloc) = post_names(per_post, &src.id, src.published.as_deref(), &src.title);
+        let base = root.join(&*post_dir);
+        let mut push = |dest: std::path::PathBuf, label: String, size: Option<u64>, ext: ExtSource, child, renamed| {
+            out.push(Planned {
+                job: Job { id: out.len() as u64, url: link.url.clone(), dest, expected_size: size, label, ext: Some(ext) },
+                origin: JobOrigin::Link { link: link.id, child },
+                renamed,
+            });
+        };
+        match &res.kind {
+            ResolvedKind::File => {
+                let Some(ext) = ext_source(link, None) else { continue };
+                let wanted = sanitize_component(&res.name, MAX_COMPONENT_BYTES);
+                let name = alloc.allocate(&wanted);
+                push(base.join(&name), format!("{post_dir}/{name}"), res.size, ext, None, name != wanted);
+            }
+            ResolvedKind::Folder { children, .. } => {
+                let folder = alloc.allocate(&sanitize_component(&res.name, MAX_COMPONENT_BYTES));
+                let chosen: Vec<usize> = match &pick.children {
+                    Some(c) => c.clone(),
+                    None => (0..children.len()).collect(),
+                };
+                for ci in chosen {
+                    let Some(child) = children.get(ci) else { continue };
+                    let Some(ext) = ext_source(link, Some(child)) else { continue };
+                    let mut dir = base.join(&folder);
+                    for d in &child.dirs {
+                        dir.push(sanitize_component(d, MAX_COMPONENT_BYTES));
+                    }
+                    let wanted = sanitize_component(&child.name, MAX_COMPONENT_BYTES);
+                    let leaf = dir_names.entry(dir.clone()).or_default().allocate(&wanted);
+                    let rel = dir.strip_prefix(&base).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+                    push(dir.join(&leaf), format!("{post_dir}/{rel}/{leaf}"), child.size, ext, Some(ci), leaf != wanted);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
