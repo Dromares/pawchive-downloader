@@ -442,10 +442,14 @@ mod tests {
             id: id.into(),
             title: format!("Post {id}"),
             published: Some(published.into()),
+            added: None,
+            edited: None,
             file: None,
             attachments: vec![],
             content: content.into(),
             embed: None,
+            has_full: None,
+            preview_state: None,
         }
     }
 
@@ -569,7 +573,7 @@ mod tests {
     #[test]
     fn embed_url_counts_and_a_missing_body_is_fine() {
         let mut p = post("1", "2026-01-01", "");
-        p.embed = Some(crate::model::RawEmbed { url: "https://youtu.be/abc".into(), description: String::new() });
+        p.embed = Some(crate::model::RawEmbed { url: "https://youtu.be/abc".into(), ..Default::default() });
         let links = collect(&[p]);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].host.name(), "youtu.be");

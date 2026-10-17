@@ -1,5 +1,5 @@
 //! Core library for the Pawchive downloader: API client, file model, classification,
-//! naming, and the download engine. It has no GUI dependencies.
+//! naming, the download engine, and the saved library with its incremental scan. It has no GUI dependencies.
 
 pub mod api;
 pub mod classify;
@@ -12,6 +12,7 @@ pub mod export;
 pub mod external;
 pub mod gate;
 pub mod http;
+pub mod library;
 pub mod links;
 pub mod model;
 pub mod names;

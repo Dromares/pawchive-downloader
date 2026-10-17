@@ -42,6 +42,11 @@ impl Hosts {
         format!("{}/api/v1/{}/user/{}?o={offset}", self.api, c.service.as_str(), c.id)
     }
 
+    /// `GET {api}/api/v1/{service}/user/{id}/profile`: name and the `updated` time.
+    pub fn profile_url(&self, c: &CreatorRef) -> String {
+        format!("{}/api/v1/{}/user/{}/profile", self.api, c.service.as_str(), c.id)
+    }
+
     /// `GET {api}/api/v1/{service}/user/{id}/post/{post_id}`: one post, flat object.
     pub fn post_url(&self, c: &CreatorRef, post_id: &str) -> String {
         format!("{}/api/v1/{}/user/{}/post/{post_id}", self.api, c.service.as_str(), c.id)
@@ -101,6 +106,16 @@ pub struct ScanResult {
     pub post: Option<PostRef>,
 }
 
+/// The two fields of `…/profile` the library uses. Everything else is ignored.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct ProfileInfo {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// When Pawchive last updated this creator. Moves when a post is added or re-imported.
+    #[serde(default)]
+    pub updated: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Client {
     pub http: Http,
@@ -155,6 +170,41 @@ impl Client {
             on_progress(progress);
         }
         Err(Error::Parse(format!("gave up after {MAX_PAGES} pages")))
+    }
+
+    /// One request for the profile (name and `updated`). 404 is [`Error::NotFound`].
+    pub async fn fetch_profile(&self, creator: &CreatorRef, control: &Control) -> Result<ProfileInfo> {
+        let url = self.hosts.profile_url(creator);
+        let resp = send_with_retry(&self.gate, control, &self.policy, || {
+            self.http.get(&url).header(reqwest::header::ACCEPT, "application/json")
+        })
+        .await?;
+        let body = resp.bytes().await.map_err(Error::from_reqwest)?;
+        serde_json::from_slice(&body).map_err(|e| Error::Parse(e.to_string()))
+    }
+
+    /// One page of the post list (`?o=offset`). An empty page ends the list.
+    pub async fn fetch_page(&self, creator: &CreatorRef, offset: usize, control: &Control) -> Result<Vec<Post>> {
+        let url = self.hosts.page_url(creator, offset);
+        let resp = send_with_retry(&self.gate, control, &self.policy, || {
+            self.http.get(&url).header(reqwest::header::ACCEPT, "application/json")
+        })
+        .await?;
+        parse_posts(&resp.bytes().await.map_err(Error::from_reqwest)?)
+    }
+
+    /// One post by id; `None` when the site answers 404 (the post is gone).
+    pub async fn fetch_post(&self, creator: &CreatorRef, post_id: &str, control: &Control) -> Result<Option<Post>> {
+        let url = self.hosts.post_url(creator, post_id);
+        let resp = send_with_retry(&self.gate, control, &self.policy, || {
+            self.http.get(&url).header(reqwest::header::ACCEPT, "application/json")
+        })
+        .await;
+        match resp {
+            Ok(resp) => parse_post(&resp.bytes().await.map_err(Error::from_reqwest)?).map(Some),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// One request for a single post (`/post/{id}` links): its files and the links in its text.

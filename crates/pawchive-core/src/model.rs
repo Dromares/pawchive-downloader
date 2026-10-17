@@ -82,6 +82,12 @@ pub struct Post {
     pub title: String,
     #[serde(default)]
     pub published: Option<String>,
+    /// When Pawchive first indexed the post. Never moves, so it is not a change signal.
+    #[serde(default)]
+    pub added: Option<String>,
+    /// The source platform's edit time as of the latest import. `null` on old imports.
+    #[serde(default)]
+    pub edited: Option<String>,
     #[serde(default)]
     pub file: Option<RawFile>,
     #[serde(default, deserialize_with = "null_as_default")]
@@ -92,6 +98,13 @@ pub struct Post {
     /// `{}` on most posts; an embedded link has `url`, `subject` and `description`.
     #[serde(default, deserialize_with = "lenient_embed")]
     pub embed: Option<RawEmbed>,
+    /// `false`: Pawchive holds no full-size copy yet, so the files answer 404. Absent in older
+    /// samples, which is read as "available".
+    #[serde(default)]
+    pub has_full: Option<bool>,
+    /// `pending` / `scraped`.
+    #[serde(default)]
+    pub preview_state: Option<String>,
 }
 
 /// The `embed` object of a post. Every field is optional (`{}` is the common case).
@@ -99,6 +112,8 @@ pub struct Post {
 pub struct RawEmbed {
     #[serde(default, deserialize_with = "null_as_default")]
     pub url: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub subject: String,
     #[serde(default, deserialize_with = "null_as_default")]
     pub description: String,
 }
@@ -132,6 +147,12 @@ impl FileEntry {
 }
 
 impl Post {
+    /// Pawchive holds a full-size copy of `f`: the post is fully imported and the file is not a
+    /// preview. Both flags predicted every file request in the DAN-1656 probe (48 of 48).
+    pub fn is_downloadable(&self, f: &FileEntry) -> bool {
+        self.has_full != Some(false) && !f.preview_only
+    }
+
     /// `file` then `attachments`, de-duplicated by `path` within the post (the main file is often
     /// repeated as an attachment). Entries without a path are dropped.
     pub fn files(&self) -> Vec<FileEntry> {

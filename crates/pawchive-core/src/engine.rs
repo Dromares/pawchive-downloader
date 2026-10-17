@@ -127,6 +127,9 @@ pub struct Engine {
     gate: Gate,
     cfg: Arc<EngineConfig>,
     ext: Option<Arc<ExtClient>>,
+    /// Never replace a file at the destination (the library's rule). Off by default: a download
+    /// outside the library still replaces a stale file of the wrong size.
+    no_replace: bool,
 }
 
 type Emit = Arc<dyn Fn(Event) + Send + Sync>;
@@ -198,13 +201,22 @@ fn part_path(dest: &Path) -> PathBuf {
 impl Engine {
     pub fn new(http: Http, gate: Gate, cfg: EngineConfig) -> Self {
         let cfg = EngineConfig { concurrency: cfg.concurrency.clamp(1, MAX_CONCURRENCY), ..cfg };
-        Engine { http, gate, cfg: Arc::new(cfg), ext: None }
+        Engine { http, gate, cfg: Arc::new(cfg), ext: None, no_replace: false }
     }
 
     /// Allow jobs with an [`ExtSource`]. They use this client (no cookies, plain user agent) and the
     /// per-host clocks inside it, never the Pawchive gate.
     pub fn with_external(mut self, ext: ExtClient) -> Self {
         self.ext = Some(Arc::new(ext));
+        self
+    }
+
+    /// Never overwrite or delete a file at a job's destination. A job whose destination exists is
+    /// skipped, and a file that appears there while the transfer runs makes the job fail with the
+    /// finished download left in its `.part` file. The final step is a hard link, which cannot
+    /// replace; a filesystem without hard links falls back to a check followed by a rename.
+    pub fn with_no_replace(mut self) -> Self {
+        self.no_replace = true;
         self
     }
 
@@ -265,6 +277,9 @@ impl Engine {
             if let Err(e) = fs::create_dir_all(dir).await {
                 return Outcome::Failed { error: format!("cannot create {}: {e}", dir.display()), permanent: true };
             }
+        }
+        if self.no_replace && fs::symlink_metadata(&job.dest).await.is_ok() {
+            return Outcome::Skipped;
         }
         if let Ok(md) = fs::metadata(&job.dest).await {
             // Present with the expected size (or, with no expectation, non-empty): nothing to do.
@@ -340,7 +355,7 @@ impl Engine {
             416 if existing > 0 => {
                 // Our .part is at or beyond the end: complete if it matches, otherwise start over.
                 if job.expected_size == Some(existing) {
-                    return finish(part, &job.dest, existing).await;
+                    return finish(part, &job.dest, existing, self.no_replace).await;
                 }
                 let _ = fs::remove_file(part).await;
                 return retry("range not satisfiable; restarting".into(), None);
@@ -410,7 +425,7 @@ impl Engine {
             }
         }
         emit(Event::Progress { id: job.id, done, total: Some(done) });
-        finish(part, &job.dest, done).await
+        finish(part, &job.dest, done, self.no_replace).await
     }
 }
 
@@ -470,12 +485,46 @@ impl Engine {
     }
 }
 
-async fn finish(part: &Path, dest: &Path, bytes: u64) -> Step {
+async fn finish(part: &Path, dest: &Path, bytes: u64, no_replace: bool) -> Step {
+    if no_replace {
+        return finish_without_replacing(part, dest, bytes).await;
+    }
     if fs::metadata(dest).await.is_ok() {
         let _ = fs::remove_file(dest).await; // replacing a stale/mismatched file
     }
     match fs::rename(part, dest).await {
         Ok(()) => Step::Done(bytes),
         Err(e) => Step::Fail { error: format!("cannot move {} into place: {e}", part.display()), permanent: true },
+    }
+}
+
+/// Move `part` to `dest` only if nothing is there. `hard_link` fails with `AlreadyExists` instead
+/// of replacing; the `.part` name is removed once the link is in place.
+async fn finish_without_replacing(part: &Path, dest: &Path, bytes: u64) -> Step {
+    let exists = |what: &str| Step::Fail {
+        error: format!(
+            "{what} appeared while downloading; not replacing it (the new copy stays in {})",
+            part.display()
+        ),
+        permanent: true,
+    };
+    match fs::hard_link(part, dest).await {
+        Ok(()) => {
+            let _ = fs::remove_file(part).await;
+            Step::Done(bytes)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => exists(&dest.display().to_string()),
+        Err(_) => {
+            // No hard links here (FAT, some network mounts): check, then rename. Not atomic.
+            if fs::symlink_metadata(dest).await.is_ok() {
+                return exists(&dest.display().to_string());
+            }
+            match fs::rename(part, dest).await {
+                Ok(()) => Step::Done(bytes),
+                Err(e) => {
+                    Step::Fail { error: format!("cannot move {} into place: {e}", part.display()), permanent: true }
+                }
+            }
+        }
     }
 }
