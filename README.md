@@ -17,7 +17,16 @@ A Rust-only desktop app for downloading a creator's files from [Pawchive](https:
    their own row, unchecked by default, and saved as `name.thumb.ext` if you tick it.
 3. Choose an output folder, then **Download**. Files land in
    `<output>/<service>_<creator>/<date>_<post id>_<title>/`.
-4. Pause, resume or cancel at any time; interrupted files keep a `.part` file and resume with a
+4. **External links.** Links in a post's text (Google Drive files and folders, Mediafire files) are listed in
+   the **External links** tab, one row per unique link. Nothing is ticked by default. `Check links` (or ticking
+   a row) reads a link's real name, size and whether it is still alive; a Drive folder is listed with its
+   sub-folders and keeps them on disk. Other hosts (Mega, Dropbox, anything else) are listed as *Not
+   downloadable* and are still included in **Export list** (`.txt` or `.csv`). A post link
+   (`…/user/{id}/post/{post}`) scans only that post; a creator link scans every post. Link files are saved in
+   the post's folder next to the Pawchive files, sorted by their real file name and Content-Type.
+   Google Drive and Mediafire each get their own request clock and one download at a time; the cookie file
+   and the contact string are sent to pawchive.pw only.
+5. Pause, resume or cancel at any time; interrupted files keep a `.part` file and resume with a
    `Range` request. Failed files are listed with **Retry failed**.
 
 Settings: concurrent downloads (1-5, default 2), minimum delay between requests (never below 1 s),
@@ -32,8 +41,9 @@ The layout follows the UI spec on DAN-1542.
 ## Politeness
 
 The site's bot page asks for at most 1 request per second, at most 5 active downloads and an
-identifiable user agent. The app enforces one global request gate across every host (API pages, size
-probes, download starts and retries). 429, 5xx and network errors back off exponentially and honour
+identifiable user agent. The app enforces one request gate for pawchive.pw (API pages, size
+probes, download starts and retries); Google Drive and Mediafire each have their own gate with the same pause,
+so a throttled Drive never slows Pawchive or Mediafire down. 429, 5xx and network errors back off exponentially and honour
 `Retry-After`; a 403 bot page pauses all requests for 60 s; a 404 is a permanent failure.
 
 ## Build
@@ -93,8 +103,8 @@ is any empty directory with about 6 GB free.
    ```
    $IN cargo build --release
    $IN cargo packager --release --formats appimage
-   cp $REPO/target/release/pawchive-downloader_0.1.1_x86_64.AppImage $WORK/pawchive-downloader-0.1.1-x86_64.AppImage
-   cd $WORK && sha256sum pawchive-downloader-0.1.1-x86_64.AppImage > pawchive-downloader-0.1.1-x86_64.AppImage.sha256
+   cp $REPO/target/release/pawchive-downloader_0.2.0_x86_64.AppImage $WORK/pawchive-downloader-0.2.0-x86_64.AppImage
+   cd $WORK && sha256sum pawchive-downloader-0.2.0-x86_64.AppImage > pawchive-downloader-0.2.0-x86_64.AppImage.sha256
    ```
 
    The packager settings are in `crates/pawchive-gui/Cargo.toml` (`[package.metadata.packager]`); the icons
@@ -104,7 +114,7 @@ is any empty directory with about 6 GB free.
 
    ```
    objdump -T $REPO/target/release/pawchive-downloader | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1   # GLIBC_2.35
-   $WORK/pawchive-downloader-0.1.1-x86_64.AppImage --appimage-extract     # unpacks to ./squashfs-root
+   $WORK/pawchive-downloader-0.2.0-x86_64.AppImage --appimage-extract     # unpacks to ./squashfs-root
    find squashfs-root -name '*.so*'                                         # nothing is bundled
    ```
 
@@ -151,6 +161,9 @@ F12 saves a screenshot of the window as `pawchive-screenshot-<unix time>.png` in
 
 Debug builds also read `PAWCHIVE_DEV_BASE_URL` (send every request to a local test server instead of
 pawchive.pw), `PAWCHIVE_DEV_AUTOSCAN=<url>`, `PAWCHIVE_DEV_AUTODOWNLOAD=<dir>`,
-`PAWCHIVE_DEV_OPEN_SETTINGS=1` and `PAWCHIVE_DEV_SHOT_AFTER_SECS=<n>`.
+`PAWCHIVE_DEV_OPEN_SETTINGS=1` and `PAWCHIVE_DEV_SHOT_AFTER_SECS=<n>`, plus, for the external-links work,
+`PAWCHIVE_DEV_LINKS_TAB=1`, `PAWCHIVE_DEV_CHECK_LINKS=1`, `PAWCHIVE_DEV_TICK_LINKS=1|<host>` and
+`PAWCHIVE_DEV_EXPORT_DIR=<dir>` (write the export files without a save dialog). `PAWCHIVE_DEV_BASE_URL` also
+re-bases the requests to Google Drive and Mediafire onto the test server.
 
 No licence has been chosen yet.

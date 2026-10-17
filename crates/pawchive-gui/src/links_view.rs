@@ -184,7 +184,7 @@ impl App {
         }
     }
 
-    fn tick_link(&mut self, i: usize, on: bool) {
+    pub(crate) fn tick_link(&mut self, i: usize, on: bool) {
         let r = &mut self.model.links[i];
         r.set_on(on);
         if on && r.needs_check() && r.can_tick() {

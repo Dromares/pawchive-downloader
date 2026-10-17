@@ -326,8 +326,13 @@ impl App {
                 self.filter = Filter::All;
                 self.link_notice = None;
                 self.link_focus = 0;
-                if dev::tick_links() {
-                    self.tick_all_links(true);
+                if let Some(which) = dev::tick_links() {
+                    for i in 0..self.model.links.len() {
+                        let host = self.model.links[i].link.host.name().to_lowercase();
+                        if which == "1" || host.contains(&which.to_lowercase()) {
+                            self.tick_link(i, true);
+                        }
+                    }
                 } else if dev::check_links() {
                     self.link_checks.extend((0..self.model.links.len()).filter(|&i| self.model.links[i].needs_check()));
                 }

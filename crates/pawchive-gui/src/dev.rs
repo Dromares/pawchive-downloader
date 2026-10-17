@@ -41,9 +41,10 @@ pub fn open_links_tab() -> bool {
     debug_env("PAWCHIVE_DEV_LINKS_TAB").is_some()
 }
 
-/// Tick every downloadable link as soon as a scan finishes. Debug builds only.
-pub fn tick_links() -> bool {
-    debug_env("PAWCHIVE_DEV_TICK_LINKS").is_some()
+/// Tick links as soon as a scan finishes: `1` for every downloadable link, or a host name (`mediafire`).
+/// Debug builds only.
+pub fn tick_links() -> Option<String> {
+    debug_env("PAWCHIVE_DEV_TICK_LINKS")
 }
 
 /// Ask the session to check every downloadable link as soon as a scan finishes. Debug builds only.
