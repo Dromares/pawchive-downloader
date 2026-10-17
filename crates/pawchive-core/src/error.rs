@@ -18,8 +18,16 @@ pub enum Error {
     Cookies { path: PathBuf, msg: String },
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("library database: {0}")]
+    Db(String),
     #[error("cancelled")]
     Cancelled,
+}
+
+impl From<rusqlite::Error> for Error {
+    fn from(e: rusqlite::Error) -> Self {
+        Error::Db(e.to_string())
+    }
 }
 
 impl Error {
