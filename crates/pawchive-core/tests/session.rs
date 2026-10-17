@@ -75,7 +75,7 @@ impl TapBody for Resp {
 }
 
 fn start(base: &str) -> (pawchive_core::session::SessionHandle, Receiver<UiEvent>) {
-    let hosts = Hosts { api: base.into(), file: base.into(), thumb: base.into() };
+    let hosts = Hosts { api: base.into(), file: base.into(), thumb: base.into(), external: None };
     let tuning = Tuning {
         retry: RetryPolicy { base: Duration::from_millis(10), ..Default::default() },
         delay_override: Some(Duration::from_millis(1)),
@@ -309,7 +309,7 @@ fn skip_sizing_stops_the_probes_and_downloads_still_work() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mock = rt.block_on(mock_site());
     let (handle, rx) = {
-        let hosts = Hosts { api: mock.base.clone(), file: mock.base.clone(), thumb: mock.base.clone() };
+        let hosts = Hosts { api: mock.base.clone(), file: mock.base.clone(), thumb: mock.base.clone(), external: None };
         // slow gate so sizing is still running when we skip it
         let tuning = Tuning { retry: RetryPolicy::default(), delay_override: Some(Duration::from_millis(250)) };
         spawn(Settings::default(), hosts, tuning, Arc::new(|| {}))

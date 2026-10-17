@@ -9,9 +9,22 @@ pub struct CreatorRef {
     pub id: String,
 }
 
+/// What a pasted link asks to scan: a whole creator, or one post of a creator (DAN-1612).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ScanTarget {
+    pub creator: CreatorRef,
+    /// `Some` when the link ends in `/post/{id}`: only that post is scanned.
+    pub post_id: Option<String>,
+}
+
 /// Parse `https://pawchive.pw/{service}/user/{id}` (a trailing `/post/…`, query or fragment is
 /// ignored). Unknown hosts and services are rejected with a message the UI can show directly.
 pub fn parse_creator_url(input: &str) -> Result<CreatorRef> {
+    parse_scan_url(input).map(|t| t.creator)
+}
+
+/// Like [`parse_creator_url`], but keeps the `/post/{id}` part: a post link scans only that post.
+pub fn parse_scan_url(input: &str) -> Result<ScanTarget> {
     let input = input.trim();
     if input.is_empty() {
         return Err(Error::BadUrl("paste a Pawchive creator URL first".into()));
@@ -29,12 +42,18 @@ pub fn parse_creator_url(input: &str) -> Result<CreatorRef> {
     }
     let segs: Vec<&str> = url.path_segments().map(|s| s.filter(|x| !x.is_empty()).collect()).unwrap_or_default();
     match segs.as_slice() {
-        [service, "user", id, ..] => {
+        [service, "user", id, rest @ ..] => {
             let service = Service::parse(service)?;
             if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
                 return Err(Error::BadUrl(format!("\"{id}\" is not a valid creator id")));
             }
-            Ok(CreatorRef { service, id: (*id).to_string() })
+            let post_id = match rest {
+                ["post", pid, ..] if !pid.is_empty() && pid.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') => {
+                    Some((*pid).to_string())
+                }
+                _ => None,
+            };
+            Ok(ScanTarget { creator: CreatorRef { service, id: (*id).to_string() }, post_id })
         }
         _ => Err(Error::BadUrl("expected a creator URL like https://pawchive.pw/fanbox/user/1386751".into())),
     }
@@ -55,6 +74,14 @@ mod tests {
         ] {
             assert_eq!(parse_creator_url(u).unwrap(), want, "{u}");
         }
+    }
+
+    #[test]
+    fn a_post_link_keeps_its_post_id_and_a_creator_link_has_none() {
+        let t = parse_scan_url("https://pawchive.pw/patreon/user/5163822/post/162546844?x=1").unwrap();
+        assert_eq!((t.creator.id.as_str(), t.post_id.as_deref()), ("5163822", Some("162546844")));
+        assert_eq!(parse_scan_url("https://pawchive.pw/patreon/user/5163822/").unwrap().post_id, None);
+        assert_eq!(parse_scan_url("https://pawchive.pw/patreon/user/5163822/post").unwrap().post_id, None);
     }
 
     #[test]

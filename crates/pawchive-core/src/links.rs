@@ -189,7 +189,7 @@ fn scan_text(text: &str, out: &mut Vec<String>) {
 }
 
 /// The value of attribute `name` in the tag source `tag` (`<a href="…">`), entity-decoded.
-fn attr(tag: &str, name: &str) -> Option<String> {
+pub(crate) fn attr(tag: &str, name: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
     let mut from = 0;
     while let Some(rel) = lower[from..].find(name) {
