@@ -368,7 +368,10 @@ impl Model {
             Loaded::Opened => {}
             Loaded::Updated(r) => {
                 if r.unchanged {
-                    let when = record.site_updated.clone().unwrap_or_else(|| "the last scan".to_string());
+                    let when = record
+                        .site_updated
+                        .as_deref()
+                        .map_or_else(|| "the last scan".to_string(), crate::library_view::site_time);
                     self.push_log(Level::Info, format!("Profile unchanged since {when} (1 request)"));
                 } else {
                     let pages = self.scan_progress.pages;
@@ -1523,5 +1526,90 @@ mod tests {
         assert_eq!(m.slow_secs(now), None, "the global cool-down is Pawchive-only");
         m.tick(now + Duration::from_secs(61));
         assert_eq!(m.host_cooldown_secs(ExtHost::Drive, now + Duration::from_secs(61)), None);
+    }
+
+    // ---- the saved library (DAN-1661) ---------------------------------------------------------------
+
+    fn saved_record(posts: usize) -> ProfileRecord {
+        ProfileRecord {
+            creator: creator(),
+            name: Some("Test".into()),
+            site_updated: Some("2026-10-17T13:02:44".into()),
+            last_scanned_at: Some(1_800_000_000),
+            last_full_read_at: Some(1_800_000_000),
+            posts,
+            gone: 0,
+            last_change: None,
+        }
+    }
+
+    fn loaded(how: Loaded, posts: usize) -> UiEvent {
+        UiEvent::ProfileLoaded(Box::new(ProfileLoaded {
+            how,
+            record: saved_record(posts),
+            posts: vec![],
+            files: vec![],
+            marks: vec![],
+            links: vec![],
+            probing: 0,
+        }))
+    }
+
+    #[test]
+    fn a_failed_update_ends_ready_with_the_old_data_and_a_notice_the_next_scan_clears() {
+        let now = Instant::now();
+        let mut m = Model::default();
+        m.apply(UiEvent::Profiles(Ok(vec![saved_record(1_427)])), now);
+        m.apply(loaded(Loaded::Opened, 1_427), now);
+        assert_eq!((m.phase, m.posts), (Phase::Ready, 1_427));
+        m.apply(UiEvent::UpdateStarted { kind: UpdateKind::Update, creator: creator() }, now);
+        assert_eq!(m.phase, Phase::Scanning, "an update is a scan: the phase model is unchanged");
+        assert_eq!(m.update.map(|u| u.step), Some(UpdateStep::Checking));
+        assert!(m.saved.is_some(), "the saved copy stays while it runs");
+        m.apply(UiEvent::UpdateStep(UpdateStep::Reading), now);
+        m.apply(UiEvent::UpdateStep(UpdateStep::Page(ScanProgress { pages: 6, posts: 300, files: 1 })), now);
+        m.apply(UiEvent::UpdateFailed { cause: "server answered HTTP 503 for https://x".into(), saving: false }, now);
+        assert_eq!((m.phase, m.update.is_none()), (Phase::Ready, true));
+        assert_eq!(
+            m.notice,
+            Some(Notice::Failed { page: 7, cause: "server answered HTTP 503 for https://x".into(), saving: false })
+        );
+        assert_eq!(
+            explain_update_cause("server answered HTTP 503 for https://x"),
+            "pawchive.pw answered with an error (HTTP 503)."
+        );
+        assert!(m.saved.is_some() && m.scan_failure.is_none(), "not the first-scan error state");
+        assert!(m.log.back().unwrap().text.ends_with("Saved profile unchanged."));
+        m.apply(UiEvent::UpdateStarted { kind: UpdateKind::Full, creator: creator() }, now);
+        assert!(m.notice.is_none());
+        assert_eq!(m.update.map(|u| u.step), Some(UpdateStep::Reading), "a full rescan starts at reading");
+        m.apply(UiEvent::UpdateCancelled, now);
+        assert_eq!((m.phase, m.notice.clone()), (Phase::Ready, Some(Notice::Cancelled)));
+        m.apply(loaded(Loaded::Opened, 1_427), now);
+        assert!(m.notice.is_none(), "opening clears it");
+    }
+
+    #[test]
+    fn removing_the_open_profile_closes_it_and_remembers_the_name_for_the_footer() {
+        let now = Instant::now();
+        let mut m = Model::default();
+        m.apply(UiEvent::Profiles(Ok(vec![saved_record(3)])), now);
+        m.apply(loaded(Loaded::Opened, 3), now);
+        assert!(m.is_saved(&creator()) && m.library_on());
+        m.apply(UiEvent::ProfileRemoved { creator: creator() }, now);
+        assert_eq!((m.phase, m.creator.is_none(), m.saved.is_none()), (Phase::Empty, true, true));
+        assert_eq!(m.removed_note.as_deref(), Some("Test"));
+        m.apply(UiEvent::Profiles(Ok(vec![])), now);
+        assert!(!m.is_saved(&creator()));
+        // The first scan of a profile is not an update: no summary, no labels, the plain scan states.
+        m.apply(UiEvent::ScanStarted(target()), now);
+        assert!(m.removed_note.is_none() && m.update.is_none());
+        assert_eq!(m.phase, Phase::Scanning);
+        m.apply(loaded(Loaded::First, 3), now);
+        assert_eq!(m.phase, Phase::Ready);
+        assert!(matches!(m.saved.as_ref().map(|s| &s.how), Some(Loaded::First)));
+        // An opened profile reads as "sizes not measured": nothing is probing.
+        m.apply(loaded(Loaded::Opened, 3), now);
+        assert_eq!(m.sizing, Sizing::Finished { skipped: true });
     }
 }

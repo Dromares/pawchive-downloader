@@ -1014,7 +1014,11 @@ impl App {
                     Phase::Ready => match block {
                         Some(e) => dim(p, e).size(T_BODY),
                         None => {
-                            let mut s = format!("{} · {}", files_word(sel.files), size_label(sel.bytes, sel.partial));
+                            let mut s = format!(
+                                "{} · {}",
+                                files_word(sel.files),
+                                self.size_text(sel.bytes, sel.unsized_files, sel.partial)
+                            );
                             if sel.thumbnails {
                                 s.push_str(" + thumbnails");
                             }

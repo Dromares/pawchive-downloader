@@ -81,7 +81,7 @@ fn plural_posts(n: usize) -> String {
 }
 
 /// `2026-10-17T13:02:44` -> `2026-10-17 13:02`.
-fn site_time(s: &str) -> String {
+pub(crate) fn site_time(s: &str) -> String {
     s.get(..16).map_or_else(|| s.to_string(), |t| t.replace('T', " "))
 }
 
@@ -337,31 +337,26 @@ impl App {
     /// The library file could not be opened: say so above the guide.
     pub(crate) fn library_unavailable_card(&self, ui: &mut Ui, p: &Pal) {
         let Lib::Unavailable(why) = &self.model.lib else { return };
-        ui.add_space(S4);
-        ui.vertical_centered(|ui| {
-            Frame::new()
-                .fill(p.surface)
-                .stroke(Stroke::new(1.0, p.warn))
-                .corner_radius(CornerRadius::same(RADIUS + 2))
-                .inner_margin(Margin::symmetric(18, 14))
-                .show(ui, |ui| {
-                    ui.set_width(520.0);
-                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("⚠").color(p.warn).size(T_CARD));
-                            ui.label(RichText::new("Your library couldn't be opened").size(T_CARD).strong());
-                        });
-                        ui.add(egui::Label::new(why.as_str()).wrap());
-                        ui.add(
-                            egui::Label::new(dim(
-                                p,
-                                "You can still scan and download, but profiles won't be saved or listed until this is fixed. The library file hasn't been changed or deleted.",
-                            ))
-                            .wrap(),
-                        );
-                    });
+        Frame::new()
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0, p.warn))
+            .corner_radius(CornerRadius::same(RADIUS + 2))
+            .inner_margin(Margin::symmetric(18, 14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠").color(p.warn).size(T_CARD));
+                    ui.label(RichText::new("Your library couldn't be opened").size(T_CARD).strong());
                 });
-        });
+                ui.add(egui::Label::new(why.as_str()).wrap());
+                ui.add(
+                    egui::Label::new(dim(
+                        p,
+                        "You can still scan and download, but profiles won't be saved or listed until this is fixed. The library file hasn't been changed or deleted.",
+                    ))
+                    .wrap(),
+                );
+            });
     }
 
     // ---- step 1 -----------------------------------------------------------------------------------
@@ -609,7 +604,7 @@ impl App {
     }
 
     /// `12.3 MB`, `≥ 12.3 MB` while sizes arrive, `size not measured` for a reopened profile.
-    fn size_text(&self, bytes: u64, unsized_files: usize, partial: bool) -> String {
+    pub(crate) fn size_text(&self, bytes: u64, unsized_files: usize, partial: bool) -> String {
         if bytes == 0 && unsized_files > 0 && !self.sizing_running() {
             "size not measured".to_string()
         } else {
