@@ -52,8 +52,9 @@ impl LoadedProfile {
 impl Library {
     /// Read `creator` back from the library. `None` when it is not saved.
     ///
-    /// A file Pawchive holds no full-size copy of (`available` false), and every file of a post that
-    /// is gone from the site, comes back as `missing`: listed as "Not on Pawchive", never offered.
+    /// A file Pawchive holds no full-size copy of (`available` false) comes back as `missing`: listed
+    /// as "Not on Pawchive", never offered. The files of a post that is gone from the site are not
+    /// listed at all (its row in `posts` says how many were saved).
     pub fn load(&self, creator: &CreatorRef) -> Result<Option<LoadedProfile>> {
         let Some(record) = self.profile(creator)? else { return Ok(None) };
         let records = self.posts(creator)?;
@@ -72,9 +73,11 @@ impl Library {
                 label: p.label(last_change_at),
                 files: if gone { p.files.iter().filter(|f| f.downloaded).count() } else { p.files.len() },
             });
-            for f in &p.files {
+            // Nothing of a gone post is offered, and its files do not belong in the Files tab: the Posts
+            // tab shows what was saved from it.
+            for f in p.files.iter().filter(|_| !gone) {
                 files.push(SavedFile {
-                    entry: file_entry(p, f, gone),
+                    entry: file_entry(p, f),
                     downloaded: f.downloaded,
                     saved_path: f.saved_path.clone(),
                     pending: pending.contains(&(p.post_id.clone(), f.path.clone())),
@@ -91,7 +94,7 @@ impl Library {
     }
 }
 
-fn file_entry(p: &PostRecord, f: &super::FileRecord, post_gone: bool) -> FileEntry {
+fn file_entry(p: &PostRecord, f: &super::FileRecord) -> FileEntry {
     FileEntry {
         post_id: p.post_id.clone(),
         post_title: p.title.clone(),
@@ -102,6 +105,6 @@ fn file_entry(p: &PostRecord, f: &super::FileRecord, post_gone: bool) -> FileEnt
         node: None,
         size: None,
         content_type: None,
-        missing: post_gone || !f.available,
+        missing: !f.available,
     }
 }

@@ -198,9 +198,12 @@ impl App {
         }
         if self.model.library_on() && self.model.saved.is_some() && self.model.phase != Phase::Empty {
             let can = !self.model.phase.busy();
-            let r = ui.put(back_slot, |ui: &mut Ui| {
-                crate::library_view::back_link(ui, p, can, "Wait for the current run to finish, or cancel it.")
-            });
+            // `new_child`, not `put`: `put` would move the parent's cursor back up to the slot, and
+            // step 2 would be drawn over step 1.
+            let mut slot =
+                ui.new_child(egui::UiBuilder::new().max_rect(back_slot).layout(Layout::right_to_left(Align::Center)));
+            let r =
+                crate::library_view::back_link(&mut slot, p, can, "Wait for the current run to finish, or cancel it.");
             if r.clicked() {
                 acts.push(Action::BackToList);
             }

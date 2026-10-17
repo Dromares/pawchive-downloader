@@ -963,6 +963,13 @@ pub fn est_pages(saved_posts: usize) -> usize {
     saved_posts.div_ceil(crate::api::PAGE_SIZE)
 }
 
+/// Which files of a freshly shown profile get their size measured in the background.
+enum Probe {
+    Nothing,
+    All,
+    PostsOf(HashSet<String>),
+}
+
 impl Session {
     fn attach_library(&mut self, library: Option<Result<Library, String>>) {
         match library {
@@ -1005,7 +1012,7 @@ impl Session {
             self.saved_open = false;
         } else if self.creator.as_ref() != Some(&creator) || !self.saved_open {
             // Updating from the saved list: show the saved copy first, then update it.
-            self.show_saved(&creator, Loaded::Opened, false);
+            self.show_saved(&creator, Loaded::Opened, Probe::Nothing);
         }
         self.last_jobs.clear();
         self.failed.clear();
@@ -1068,7 +1075,14 @@ impl Session {
                     requests: out.requests,
                 };
                 let how = if first { Loaded::First } else { Loaded::Updated(report) };
-                if !self.show_saved(&creator, how, true) {
+                // A first scan measures everything; an update only the files of the posts it found
+                // new or changed (an unchanged profile costs its one request and nothing more).
+                let probe = if first {
+                    Probe::All
+                } else {
+                    Probe::PostsOf(out.changes.iter().map(|c| c.post_id.clone()).collect())
+                };
+                if !self.show_saved(&creator, how, probe) {
                     self.emit(UiEvent::ScanFailed("The scan finished but the library could not be read back".into()));
                 }
                 self.send_profiles();
@@ -1084,8 +1098,8 @@ impl Session {
     }
 
     /// Put the saved profile on screen: the session's files and links become the library's, and the
-    /// front end gets everything it draws. `probe`: measure the sizes of files not downloaded yet.
-    fn show_saved(&mut self, creator: &CreatorRef, how: Loaded, probe: bool) -> bool {
+    /// front end gets everything it draws. `probe`: which files get their size measured in the background.
+    fn show_saved(&mut self, creator: &CreatorRef, how: Loaded, probe: Probe) -> bool {
         let Some(lib) = self.library.clone() else { return false };
         let loaded = match lib.load(creator) {
             Ok(Some(l)) => l,
@@ -1125,16 +1139,22 @@ impl Session {
         self.last_jobs.clear();
         self.failed.clear();
         self.targets.clear();
-        let to_probe: Vec<usize> = if probe {
-            self.files
-                .iter()
-                .enumerate()
-                .filter(|(i, f)| !f.missing && f.size.is_none() && !marks[*i].downloaded)
-                .map(|(i, _)| i)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let to_probe: Vec<usize> = self
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| {
+                !f.missing
+                    && f.size.is_none()
+                    && !marks[*i].downloaded
+                    && match &probe {
+                        Probe::Nothing => false,
+                        Probe::All => true,
+                        Probe::PostsOf(ids) => ids.contains(&f.post_id),
+                    }
+            })
+            .map(|(i, _)| i)
+            .collect();
         self.emit(UiEvent::ProfileLoaded(Box::new(ProfileLoaded {
             how,
             record,
@@ -1160,7 +1180,7 @@ impl Session {
         if let Some(c) = self.sizing.take() {
             c.cancel();
         }
-        if !self.show_saved(creator, Loaded::Opened, false) {
+        if !self.show_saved(creator, Loaded::Opened, Probe::Nothing) {
             self.log(format!("Could not open {}/{}: it is not in the library", creator.service.as_str(), creator.id));
         }
     }

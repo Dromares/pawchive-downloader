@@ -103,8 +103,8 @@ is any empty directory with about 6 GB free.
    ```
    $IN cargo build --release
    $IN cargo packager --release --formats appimage
-   cp $REPO/target/release/pawchive-downloader_0.2.0_x86_64.AppImage $WORK/pawchive-downloader-0.2.0-x86_64.AppImage
-   cd $WORK && sha256sum pawchive-downloader-0.2.0-x86_64.AppImage > pawchive-downloader-0.2.0-x86_64.AppImage.sha256
+   cp $REPO/target/release/pawchive-downloader_0.3.0_x86_64.AppImage $WORK/pawchive-downloader-0.3.0-x86_64.AppImage
+   cd $WORK && sha256sum pawchive-downloader-0.3.0-x86_64.AppImage > pawchive-downloader-0.3.0-x86_64.AppImage.sha256
    ```
 
    The packager settings are in `crates/pawchive-gui/Cargo.toml` (`[package.metadata.packager]`); the icons
@@ -114,7 +114,7 @@ is any empty directory with about 6 GB free.
 
    ```
    objdump -T $REPO/target/release/pawchive-downloader | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1   # GLIBC_2.35
-   $WORK/pawchive-downloader-0.2.0-x86_64.AppImage --appimage-extract     # unpacks to ./squashfs-root
+   $WORK/pawchive-downloader-0.3.0-x86_64.AppImage --appimage-extract     # unpacks to ./squashfs-root
    find squashfs-root -name '*.so*'                                         # nothing is bundled
    ```
 

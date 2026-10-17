@@ -108,12 +108,14 @@ impl App {
         ui.add_space(S2);
 
         // columns: Profile flex | Posts 84 | Last scanned 132 (+16 gap) | actions 168
-        let widths = if narrow {
-            vec![(w - 168.0).max(100.0), 0.0, 0.0, 168.0]
-        } else {
-            vec![(w - 84.0 - 148.0 - 168.0).max(120.0), 84.0, 148.0, 168.0]
+        let widths_for = |row_w: f32| -> Vec<f32> {
+            if narrow {
+                vec![(row_w - 168.0).max(100.0), 0.0, 0.0, 168.0]
+            } else {
+                vec![(row_w - 84.0 - 148.0 - 168.0).max(120.0), 84.0, 148.0, 168.0]
+            }
         };
-        let head = Cols::new(ui, 28.0, widths.clone());
+        let head = Cols::new(ui, 28.0, widths_for(w));
         ui.painter().rect_filled(head.rect(), CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 }, p.sunken);
         head.put(ui, 0, false, |ui| {
             ui.label(dim(p, "Profile"));
@@ -156,10 +158,11 @@ impl App {
                             if i % 2 == 1 {
                                 ui.painter().rect_filled(rect, 0.0, p.surface);
                             }
-                            let cols = Cols::at(rect, widths.clone());
+                            let cols = Cols::at(rect, widths_for(rect.width()));
                             cols.put(ui, 0, false, |ui| {
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 2.0;
+                                    ui.add_space(9.0);
                                     ui.add(egui::Label::new(RichText::new(&name).size(T_BODY).strong()).truncate());
                                     let sub = if narrow {
                                         format!("{} · {} · {when}", rec.creator.service.as_str(), rec.creator.id)
@@ -191,7 +194,9 @@ impl App {
                                 });
                             }
                             cols.put(ui, 3, false, |ui| {
-                                ui.add_space(168.0 - 72.0 - 8.0 - 76.0 - 8.0);
+                                // Exact spacing: any slack here would widen the row, and the scroll area the next one.
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.add_space(168.0 - 8.0 - 72.0 - 8.0 - 76.0);
                                 if ui
                                     .add(egui::Button::new(RichText::new("Open").strong()).min_size(vec2(72.0, 28.0)))
                                     .on_hover_text("Open from the saved copy. No request is made.")
@@ -258,7 +263,11 @@ impl App {
         ui.painter().rect_filled(Rect::from_min_size(rect.left_top(), vec2(4.0, rect.height())), 0.0, p.line_strong);
         let inner = Rect::from_min_max(rect.left_top() + vec2(16.0, 8.0), rect.right_bottom() - vec2(12.0, 6.0));
         let mut keep_id = None;
-        ui.scope_builder(UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)), |ui| {
+        // `new_child`, not `scope_builder`: a scope would move the parent's cursor back up to the
+        // end of what it drew, and the next row would overlap this one.
+        let mut child = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
+        {
+            let ui = &mut child;
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.add(egui::Label::new(RichText::new(format!("Remove “{name}” from your list?")).strong()).truncate());
             ui.add(
@@ -271,10 +280,13 @@ impl App {
             if gone > 0 {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("⚠").color(p.warn));
-                    ui.label(RichText::new(format!(
-                        "{gone} {} marked Gone from site will be forgotten.",
-                        if gone == 1 { "post" } else { "posts" }
-                    )).size(T_SMALL));
+                    ui.label(
+                        RichText::new(format!(
+                            "{gone} {} marked Gone from site will be forgotten.",
+                            if gone == 1 { "post" } else { "posts" }
+                        ))
+                        .size(T_SMALL),
+                    );
                 });
             }
             ui.add_space(2.0);
@@ -289,7 +301,7 @@ impl App {
                     acts.push(Action::ConfirmRemove);
                 }
             });
-        });
+        }
         // Keep is the safe default: it gets the focus when the row appears.
         if let Some(id) = keep_id {
             if !self.confirm_focused {
@@ -385,11 +397,12 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = S2;
                     let right = 92.0 + S2;
-                    let r = ui.add(egui::Label::new(dim(p, &line)).truncate());
-                    r.on_hover_text(&line);
-                    let gap = (ui.available_width() - right).max(0.0);
-                    ui.add_space(gap);
-                    let b = ui.add_enabled(can, egui::Button::new(RichText::new("Full rescan").size(T_SMALL)).min_size(vec2(92.0, 24.0)));
+                    // The text gets what the button leaves; a truncating label would take it all.
+                let text_w = (ui.available_width() - right).max(40.0);
+                ui.allocate_ui_with_layout(vec2(text_w, 24.0), Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(dim(p, &line)).truncate()).on_hover_text(&line);
+                });
+                let b = ui.add_enabled(can, egui::Button::new(RichText::new("Full rescan").size(T_SMALL)).min_size(vec2(92.0, 24.0)));
                     let b = if can {
                         b.on_hover_text(format!(
                             "Reads every post again, even if Pawchive says nothing changed. About {secs} s for this profile."
