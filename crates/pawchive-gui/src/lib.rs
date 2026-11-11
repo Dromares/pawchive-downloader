@@ -59,9 +59,17 @@ fn open_library() -> Result<pawchive_core::library::Library, String> {
 
 /// android-activity's C glue defines `ANativeActivity_onCreate` and calls this symbol; the
 /// activity registers the global ndk context, which winit 0.30's Android backend picks up.
+/// eframe additionally REQUIRES the activity handle in `NativeOptions::android_app`
+/// (without it `run_native` fails with "NativeOptions is missing required `android_app`"),
+/// so it is stashed here and picked up in `main`.
+#[cfg(target_os = "android")]
+static ANDROID_APP: std::sync::Mutex<Option<android_activity::AndroidApp>> =
+    std::sync::Mutex::new(None);
+
 #[cfg(target_os = "android")]
 #[no_mangle]
-extern "C" fn android_main(_app: android_activity::AndroidApp) {
+extern "C" fn android_main(app: android_activity::AndroidApp) {
+    *ANDROID_APP.lock().unwrap() = Some(app);
     // On Android stderr lands in logcat, so a swallowed `eframe::Error` must be written there
     // by hand: without this the activity finishes silently and the phone just shows a bounce.
     if let Err(why) = main() {
@@ -86,7 +94,12 @@ pub fn main() -> eframe::Result {
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    let options = eframe::NativeOptions {
+        viewport,
+        #[cfg(target_os = "android")]
+        android_app: ANDROID_APP.lock().unwrap().take(),
+        ..Default::default()
+    };
     eframe::run_native(
         "Pawchive Downloader",
         options,
