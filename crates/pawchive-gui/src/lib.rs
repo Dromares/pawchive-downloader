@@ -62,7 +62,12 @@ fn open_library() -> Result<pawchive_core::library::Library, String> {
 #[cfg(target_os = "android")]
 #[no_mangle]
 extern "C" fn android_main(_app: android_activity::AndroidApp) {
-    main();
+    // On Android stderr lands in logcat, so a swallowed `eframe::Error` must be written there
+    // by hand: without this the activity finishes silently and the phone just shows a bounce.
+    if let Err(why) = main() {
+        eprintln!("pawchive-downloader: fatal: {why}");
+        std::process::exit(1);
+    }
 }
 
 pub fn main() -> eframe::Result {

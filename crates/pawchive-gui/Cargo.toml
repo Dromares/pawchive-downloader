@@ -9,7 +9,7 @@ publish.workspace = true
 # in-process clipboard, so Ctrl+V and the middle-click paste read nothing from the system (DAN-1600).
 # On Android arboard has no backend: eframe drops the feature there, and the desktop-only
 # dependency below turns it back on everywhere else through feature unification.
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Only for `localtime_r`, to show "Last scanned" in the user's own time zone (already in the tree via eframe).
 libc = "0.2"
@@ -46,6 +46,11 @@ egui_kittest = "0.37.0"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 egui-winit = { version = "0.37.0", features = ["clipboard"] }
+eframe = { version = "0.37.0", features = ["x11", "wayland"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
+# eframe's Android support is feature-gated in 0.37: without `android-native-activity` winit
+# compiles WITHOUT its Android backend, `run_native` fails on launch, and the activity closes
+# itself an instant after the splash — the "app won't open" bug, fixed.
+eframe = { version = "0.37.0", features = ["android-native-activity"] }
