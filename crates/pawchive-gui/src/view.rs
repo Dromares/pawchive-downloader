@@ -174,7 +174,10 @@ impl App {
                         self.url = text;
                         self.url_error = None;
                     }
-                    None => self.url_error = Some("Clipboard is empty - copy the link first.".to_owned()),
+                    None => self.url_error = Some(
+                        "Clipboard is empty (or Android refused the read) - copy the link first, or use browser Share."
+                            .to_owned(),
+                    ),
                 }
             }
         });

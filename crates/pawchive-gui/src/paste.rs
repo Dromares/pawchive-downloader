@@ -37,29 +37,86 @@ pub fn clipboard_text() -> Option<String> {
         if manager.is_null() {
             return None;
         }
-        let clip = env.call_method(&manager, "getPrimaryClip", "()Landroid/content/ClipData;", &[]).ok()?.l().ok()?;
+        let clip = match env.call_method(&manager, "getPrimaryClip", "()Landroid/content/ClipData;", &[]) {
+            Ok(v) => v.l().map_err(|e| dbgline(&format!("RD clipconv {e}"))).ok()?,
+            Err(e) => {
+                dbgline(&format!("RD getPrimaryClip ERR {e}"));
+                return None;
+            }
+        };
         if clip.is_null() {
+            dbgline("RD clip_null");
             return None; // empty clipboard
         }
-        if env.call_method(&clip, "getItemCount", "()I", &[]).ok()?.i().ok()? < 1 {
-            return None;
-        }
-        let item = env
-            .call_method(&clip, "getItemAt", "(I)Landroid/content/ClipData$Item;", &[JValue::Int(0).into()])
-            .ok()?
-            .l()
-            .ok()?;
+        // Walk ClipData properly: getItemAt(0) -> Item.getText()/coerceToText(Context).
+        // Method IDs resolved explicitly so a bad signature shows up as a logged
+        // NoSuchMethodError instead of vanishing into `?` (every failed JNI call leaves a
+        // PENDING Java exception that poisons the whole thread until drained).
+        let jargs = [jni::sys::jvalue { i: 0 }];
+        let item = match env.get_method_id("android/content/ClipData", "getItemAt", "(I)Landroid/content/ClipData$Item;")
+            .and_then(|mid| env.call_method_unchecked(&clip, mid, jni::signature::ReturnType::Object, &jargs))
+        {
+            Ok(v) => {
+                if let Some(Some(msg)) = drain_exception(&mut env) {
+                    dbgline(&format!("RD getItemAt EXC {msg}"));
+                    return None;
+                }
+                match v.l() {
+                    Ok(o) => o,
+                    Err(e) => {
+                        dbgline(&format!("RD itemconv ERR {e}"));
+                        return None;
+                    }
+                }
+            }
+            Err(e) => {
+                dbgline(&format!("RD getItemAt ERR {e}"));
+                if let Some(Some(msg)) = drain_exception(&mut env) {
+                    dbgline(&format!("RD getItemAt EXC {msg}"));
+                }
+                return None;
+            }
+        };
         if item.is_null() {
+            dbgline("RD item_null");
             return None;
         }
-        // Items can hold a URI or an Intent instead of text; getText() is then null.
-        let text = env.call_method(&item, "getText", "()Landroid/text/CharSequence;", &[]).ok()?.l().ok()?;
-        if text.is_null() {
+        let app_ctx = JObject::from_raw(rt.context() as jni::sys::jobject); // Application IS a Context
+        let cs = match env.get_method_id("android/content/ClipData$Item", "coerceToText", "(Landroid/content/Context;)Ljava/lang/CharSequence;")
+            .and_then(|mid| {
+                let jargs = [jni::sys::jvalue { l: app_ctx.as_raw() }];
+                env.call_method_unchecked(&item, mid, jni::signature::ReturnType::Object, &jargs)
+            })
+        {
+            Ok(v) => {
+                if let Some(Some(msg)) = drain_exception(&mut env) {
+                    dbgline(&format!("RD item.coerce EXC {msg}"));
+                    return None;
+                }
+                match v.l() {
+                    Ok(o) => o,
+                    Err(e) => {
+                        dbgline(&format!("RD csconv ERR {e}"));
+                        return None;
+                    }
+                }
+            }
+            Err(e) => {
+                dbgline(&format!("RD item.coerce ERR {e}"));
+                if let Some(Some(msg)) = drain_exception(&mut env) {
+                    dbgline(&format!("RD item.coerce EXC {msg}"));
+                }
+                return None;
+            }
+        };
+        if cs.is_null() {
+            dbgline("RD cs_null");
             return None;
         }
-        let string = env.call_method(&text, "toString", "()Ljava/lang/String;", &[]).ok()?.l().ok()?;
+        let string = env.call_method(&cs, "toString", "()Ljava/lang/String;", &[]).ok()?.l().ok()?;
         let jstr = jni::objects::JString::from_raw(string.into_raw()); // must outlive the borrow below
         let text: String = env.get_string(&jstr).ok()?.into(); // JavaString: copies the UTF-16 into Rust
+        dbgline(&format!("RD ok len={}", text.chars().count()));
         (!text.is_empty()).then_some(text)
     }
 }
@@ -105,9 +162,11 @@ pub fn set_clipboard_text(text: &str) -> Option<()> {
             .ok()?
             .l()
             .ok()?;
-        env.call_method(&manager, "setPrimaryClip", "(Landroid/content/ClipData;)V", &[JValue::Object(&clip).into()])
-            .is_ok()
-            .then_some(())
+        let set = env.call_method(&manager, "setPrimaryClip", "(Landroid/content/ClipData;)V", &[JValue::Object(&clip).into()]);
+        if let Some(Some(msg)) = drain_exception(&mut env) {
+            dbgline(&format!("SET exc {msg}"));
+        }
+        set.is_ok().then_some(())
     }
 }
 
@@ -173,3 +232,24 @@ pub fn fresh_intent_url() -> Option<String> {
         url
     })
 }
+
+/// Pull any PENDING Java exception off the thread and render it — mandatory hygiene here:
+/// a failed JNI call leaves the exception pending, and every later JNI call on this thread
+/// (including intent reads!) then fails with "unexpected pending exception" until drained.
+#[cfg(target_os = "android")]
+unsafe fn drain_exception(env: &mut jni::JNIEnv<'_>) -> Option<Option<String>> {
+    let t = env.exception_occurred().ok()?;
+    if t.is_null() {
+        return Some(None);
+    }
+    env.exception_clear().ok()?;
+    let s = env.call_method(&t, "toString", "()Ljava/lang/String;", &[]).ok()?.l().ok()?;
+    let jstr = jni::objects::JString::from_raw(s.into_raw());
+    let owned: String = env.get_string(&jstr).ok()?.into();
+    Some(Some(owned))
+}
+
+/// Failure breadcrumbs for the clipboard path; swallowed on purpose (UI shows one honest hint).
+#[cfg(target_os = "android")]
+fn dbgline(_s: &str) {}
+
