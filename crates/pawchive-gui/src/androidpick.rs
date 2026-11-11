@@ -90,7 +90,7 @@ impl FolderPicker {
                             self.refresh();
                         }
                     }
-                    ui.label(RichText::new(self.path.display().to_string()).weak().size(12.0));
+                    ui.add(egui::Label::new(RichText::new(self.path.display().to_string()).weak().size(12.0)).truncate());
                 });
                 let blocked = !writable(&self.path);
                 if blocked || self.note.is_some() {
@@ -115,8 +115,17 @@ impl FolderPicker {
                 let height = (screen.height() * 0.5).clamp(160.0, 520.0);
                 ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show(ui, |ui| {
                     for (name, is_dir) in self.entries.clone() {
-                        let label = if is_dir { format!("{name}/") } else { name.clone() };
-                        if ui.add(egui::Button::new(label).min_size(egui::vec2(ui.available_width(), 0.0))).clicked() {
+                        let full = if is_dir { format!("{name}/") } else { name.clone() };
+                        // Long names must not stretch the window: egui windows can never shrink
+                        // below their content's minimum width, so truncate in the string layer.
+                        let label: String = if full.chars().count() > 44 {
+                            let head: String = full.chars().take(42).collect();
+                            format!("{head}...")
+                        } else {
+                            full.clone()
+                        };
+                        let w = ui.available_width();
+                        if ui.add_sized(egui::vec2(w, 30.0), egui::Button::new(label)).clicked() {
                             if is_dir {
                                 self.path = self.path.join(&name);
                                 self.refresh();
@@ -132,10 +141,16 @@ impl FolderPicker {
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     if matches!(self.mode, PickMode::Folders) {
-                        let name =
+                        let raw =
                             self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| {
                                 self.path.display().to_string()
                             });
+                        let name: String = if raw.chars().count() > 24 {
+                            let head: String = raw.chars().take(22).collect();
+                            format!("{head}...")
+                        } else {
+                            raw
+                        };
                         let choose = ui.button(format!("Choose “{name}”"));
                         if choose.clicked() {
                             if blocked {
