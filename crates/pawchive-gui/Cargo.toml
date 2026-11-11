@@ -50,6 +50,9 @@ eframe = { version = "0.37.0", default-features = false, features = ["accesskit"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
+# Paste button: ClipboardManager over JNI (see src/paste.rs); ndk-context hands us the activity.
+jni = "0.21"
+ndk-context = "0.1.1"
 # eframe's Android support is feature-gated in 0.37: without `android-native-activity` winit
 # compiles WITHOUT its Android backend, `run_native` fails on launch, and the activity closes
 # itself an instant after the splash — the "app won't open" bug, fixed. `accesskit` must stay

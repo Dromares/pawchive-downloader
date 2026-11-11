@@ -980,6 +980,13 @@ impl App {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.screen_rect = ui.max_rect();
+        // Android text entry, the only kind that works: a soft keyboard cannot reach a
+        // NativeActivity Rust app (see paste.rs), so links arrive from Share/VIEW intents.
+        #[cfg(target_os = "android")]
+        if let Some(link) = crate::paste::fresh_intent_url() {
+            self.url = link;
+            self.url_error = None;
+        }
         let pal = Pal::new(ctx.theme().into());
         self.dev_hooks(&ctx);
         self.shortcuts(&ctx);

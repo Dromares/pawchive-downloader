@@ -4,6 +4,8 @@
 mod app;
 #[cfg(target_os = "android")]
 mod androidpick;
+#[cfg(target_os = "android")]
+mod paste;
 mod derive;
 mod dev;
 mod format;
@@ -112,7 +114,7 @@ pub fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport,
         #[cfg(target_os = "android")]
-        android_app: ANDROID_APP.lock().unwrap().take(),
+        android_app: ANDROID_APP.lock().unwrap().clone(), // clone, not take: draw() polls intents via android_app()
         ..Default::default()
     };
     eframe::run_native(
