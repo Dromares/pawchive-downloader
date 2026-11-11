@@ -133,6 +133,10 @@ pub struct App {
     pub(crate) tab: Tab,
     pub(crate) filter: Filter,
     pub(crate) settings_open: bool,
+    /// True screen rect, measured from the main UI every frame. On Android
+    /// `viewport().inner_rect` reports nothing (we got the 800x600 fallback and it clipped every
+    /// modal off both screen edges), but the panels themselves always know the real area.
+    pub(crate) screen_rect: egui::Rect,
     pub(crate) quit_open: bool,
     quit_now: bool,
     focus_url: bool,
@@ -212,6 +216,7 @@ impl App {
             picker_rx,
             #[cfg(target_os = "android")]
             folder_picker: None,
+            screen_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
             picker_busy: false,
             note_tx,
             note_rx,
@@ -974,6 +979,7 @@ impl eframe::App for App {
 impl App {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        self.screen_rect = ui.max_rect();
         let pal = Pal::new(ctx.theme().into());
         self.dev_hooks(&ctx);
         self.shortcuts(&ctx);
@@ -1022,7 +1028,7 @@ impl App {
         {
             let mut applied = None;
             if let Some(pk) = &mut self.folder_picker {
-                pk.show(&ctx, &pal);
+                pk.show(&ctx, &pal, self.screen_rect);
                 if let Some(res) = pk.done.take() {
                     applied = Some((pk.which, res));
                 }

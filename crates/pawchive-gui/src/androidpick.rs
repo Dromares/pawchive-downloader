@@ -71,9 +71,10 @@ impl FolderPicker {
         self.entries = entries;
     }
 
-    pub(crate) fn show(&mut self, ctx: &egui::Context, p: &Pal) {
+    pub(crate) fn show(&mut self, ctx: &egui::Context, p: &Pal, screen_rect: egui::Rect) {
         let title = if matches!(self.mode, PickMode::Folders) { "Choose a folder" } else { "Choose a file" };
-        let screen = ctx.input(|i| i.viewport().inner_rect.unwrap_or_else(|| egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))));
+        let _ = ctx;
+        let screen = screen_rect;
         let mut open = self.done.is_none();
         Window::new(title)
             .open(&mut open)
