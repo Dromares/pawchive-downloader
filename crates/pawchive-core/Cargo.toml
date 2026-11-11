@@ -18,3 +18,10 @@ url = "2.5.8"
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1.53.3", features = ["test-util"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Android's JVM trust store is unreachable from a NativeActivity app (rustls-platform-verifier
+# needs a Gradle-bundled Kotlin helper + JNI init that our no-Java APK can't provide).
+# Use Mozilla's bundled roots instead: same roots every browser ships, zero JNI.
+rustls = "0.23"
+webpki-roots = "0.26"

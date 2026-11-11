@@ -7,6 +7,24 @@ use std::time::Duration;
 use reqwest::header::{HeaderMap, COOKIE, RETRY_AFTER};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 
+// Android has no reachable JVM trust store (see Cargo.toml): build the rustls config by hand
+// from webpki-roots and hand it to reqwest pre-configured. Desktop keeps the OS store.
+#[cfg(target_os = "android")]
+fn builder() -> reqwest::ClientBuilder {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Client::builder().use_preconfigured_tls(tls)
+}
+
+#[cfg(not(target_os = "android"))]
+fn builder() -> reqwest::ClientBuilder {
+    Client::builder()
+}
+
+
 use crate::control::Control;
 use crate::cookies::CookieJar;
 use crate::error::{Error, Result};
@@ -21,7 +39,7 @@ pub struct Http {
 
 impl Http {
     pub fn new(settings: &Settings, cookies: Option<CookieJar>) -> Result<Self> {
-        let client = Client::builder()
+        let client = builder()
             .user_agent(settings.user_agent())
             .connect_timeout(Duration::from_secs(20))
             .read_timeout(Duration::from_secs(60))
@@ -46,7 +64,7 @@ impl Http {
                 attempt.follow()
             }
         });
-        let client = Client::builder()
+        let client = builder()
             .user_agent(format!("pawchive-downloader/{}", crate::VERSION))
             .connect_timeout(Duration::from_secs(20))
             .read_timeout(Duration::from_secs(60))
