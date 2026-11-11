@@ -20,6 +20,20 @@ pub fn install_paths() {
     }
 }
 
+/// The strip Android draws OVER the app (status bar): native activities render fullscreen, so
+/// the title row needs this much extra top margin or the notification icons sit on the title.
+/// Roughly Android's status-bar height in dp; logical points map 1:1 here.
+pub fn top_inset() -> f32 {
+    #[cfg(target_os = "android")]
+    {
+        26.0
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        0.0
+    }
+}
+
 /// The folder downloads land in when the user has not picked one. On Android this is the app's
 /// external files dir (`/storage/emulated/0/Android/data/<pkg>/files`), which a plain file
 /// manager can read; created on first use. Empty string elsewhere (the picker stays required).

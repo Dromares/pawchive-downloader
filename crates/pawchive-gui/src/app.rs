@@ -96,7 +96,7 @@ pub enum Filter {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Picker {
+pub(crate) enum Picker {
     Output,
     CookieFile,
 }
@@ -141,6 +141,9 @@ pub struct App {
     picker_tx: Sender<(Picker, Option<PathBuf>)>,
     picker_rx: Receiver<(Picker, Option<PathBuf>)>,
     pub(crate) picker_busy: bool,
+    /// Android-only in-app path browser (no portal/SAF): see `androidpick`.
+    #[cfg(target_os = "android")]
+    folder_picker: Option<crate::androidpick::FolderPicker>,
     note_tx: Sender<String>,
     note_rx: Receiver<String>,
     export_tx: Sender<ExportDone>,
@@ -207,6 +210,8 @@ impl App {
             ready_cache: None,
             picker_tx,
             picker_rx,
+            #[cfg(target_os = "android")]
+            folder_picker: None,
             picker_busy: false,
             note_tx,
             note_rx,
@@ -512,25 +517,42 @@ impl App {
     }
 
     fn pick(&mut self, ctx: &egui::Context, which: Picker) {
-        if self.picker_busy {
+        // Android has no XDG portal and SAF hands out `content://` URIs the `std::fs` engine
+        // cannot write: open the in-app path browser instead (androidpick).
+        #[cfg(target_os = "android")]
+        {
+            let (mode, start) = match which {
+                Picker::Output => (
+                    crate::androidpick::PickMode::Folders,
+                    PathBuf::from(self.output.trim()).parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/storage/emulated/0")),
+                ),
+                Picker::CookieFile => (
+                    crate::androidpick::PickMode::Files,
+                    self.settings.cookie_file.as_deref().and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/storage/emulated/0")),
+                ),
+            };
+            let start = if start.is_dir() { start } else { PathBuf::from("/storage/emulated/0") };
+            self.folder_picker = Some(crate::androidpick::FolderPicker::new(which, mode, start));
+            ctx.request_repaint();
             return;
         }
-        self.picker_busy = true;
-        let (tx, ctx) = (self.picker_tx.clone(), ctx.clone());
-        // The portal call blocks, so it runs on its own thread and the window keeps repainting.
-        std::thread::spawn(move || {
-            // Android has no XDG portal: the output folder is the platform default and the cookie
-            // file stays unset until a picker exists (typed path is a follow-up).
-            #[cfg(target_os = "android")]
-            let path: Option<std::path::PathBuf> = None;
-            #[cfg(not(target_os = "android"))]
-            let path = match which {
-                Picker::Output => rfd::FileDialog::new().set_title("Choose the output folder").pick_folder(),
-                Picker::CookieFile => rfd::FileDialog::new().set_title("Choose a cookies.txt file").pick_file(),
-            };
-            let _ = tx.send((which, path));
-            ctx.request_repaint();
-        });
+        #[cfg(not(target_os = "android"))]
+        {
+            if self.picker_busy {
+                return;
+            }
+            self.picker_busy = true;
+            let (tx, ctx) = (self.picker_tx.clone(), ctx.clone());
+            // The portal call blocks, so it runs on its own thread and the window keeps repainting.
+            std::thread::spawn(move || {
+                let path = match which {
+                    Picker::Output => rfd::FileDialog::new().set_title("Choose the output folder").pick_folder(),
+                    Picker::CookieFile => rfd::FileDialog::new().set_title("Choose a cookies.txt file").pick_file(),
+                };
+                let _ = tx.send((which, path));
+                ctx.request_repaint();
+            });
+        }
     }
 
     // ---- settings persistence --------------------------------------------------------------------
@@ -960,7 +982,7 @@ impl App {
             |l, r, t, b| Frame::new().fill(pal.bg).inner_margin(Margin { left: l, right: r, top: t, bottom: b });
         let (m, s) = (S4 as i8, 10);
 
-        egui::Panel::top("title").frame(panel(m, m, 12, s)).show(ui, |ui| self.titlebar(ui, &pal, &mut acts));
+        egui::Panel::top("title").frame(panel(m, m, 12 + crate::platform::top_inset() as i8, s)).show(ui, |ui| self.titlebar(ui, &pal, &mut acts));
         // Tab order is widget creation order (UI-SPEC §7: the bottom bar is last), but the bar's panel
         // must be declared before the central area to claim its strip. So the panel only reserves the
         // strip; the bar's widgets are created after everything else, into that rect.
@@ -970,10 +992,23 @@ impl App {
                 ui.allocate_exact_size(egui::vec2(ui.available_width(), theme::BTN_H), egui::Sense::hover()).0
             })
             .inner;
-        egui::Panel::left("setup").exact_size(LEFT_W).resizable(false).frame(panel(m, m, 14, 0)).show(ui, |ui| {
-            self.left(ui, &pal, &mut acts);
-        });
-        egui::CentralPanel::default().frame(panel(m, m, 14, 12)).show(ui, |ui| self.centre(ui, &pal, &mut acts));
+        // Narrow screens (phones in portrait: ~460 logical pts) cannot host LEFT_W (400) side by side
+        // with a usable centre — the guide card would be an invisible sliver and the middle a dead
+        // gap. Below that threshold everything stacks into one scrolling column.
+        if ui.available_width() < LEFT_W + 340.0 {
+            egui::CentralPanel::default().frame(panel(m, m, 8, 6)).show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    self.left(ui, &pal, &mut acts);
+                    ui.add_space(12.0);
+                    self.centre(ui, &pal, &mut acts);
+                });
+            });
+        } else {
+            egui::Panel::left("setup").exact_size(LEFT_W).resizable(false).frame(panel(m, m, 14, 0)).show(ui, |ui| {
+                self.left(ui, &pal, &mut acts);
+            });
+            egui::CentralPanel::default().frame(panel(m, m, 14, 12)).show(ui, |ui| self.centre(ui, &pal, &mut acts));
+        }
         self.action_bar(&mut ui.new_child(egui::UiBuilder::new().max_rect(bar)), &pal, &mut acts);
 
         if self.settings_open {
@@ -981,6 +1016,28 @@ impl App {
         }
         if self.quit_open {
             self.quit_modal(&ctx, &pal);
+        }
+        // Android in-app path browser: render, then apply the result outside the borrow.
+        #[cfg(target_os = "android")]
+        {
+            let mut applied = None;
+            if let Some(pk) = &mut self.folder_picker {
+                pk.show(&ctx, &pal);
+                if let Some(res) = pk.done.take() {
+                    applied = Some((pk.which, res));
+                }
+            }
+            if let Some((which, path)) = applied {
+                match which {
+                    Picker::Output => {
+                        if let Some(p) = path {
+                            self.output = p.display().to_string();
+                        }
+                    }
+                    Picker::CookieFile => self.settings.cookie_file = path,
+                }
+                self.folder_picker = None;
+            }
         }
         for a in acts {
             self.perform(a, &ctx);

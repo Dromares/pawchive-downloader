@@ -14,7 +14,12 @@ impl App {
         let mut acts: Vec<Action> = Vec::new();
         let mut close = false;
         let modal = egui::Modal::new(egui::Id::unique("settings")).backdrop_color(p.backdrop()).show(ctx, |ui| {
-            ui.set_width(480.0);
+            // Phone widths are smaller than the desktop dialog: fit the screen, and scroll the
+            // body when it is taller than the screen (landscape phones especially).
+            let screen = ctx.input(|i| i.viewport().inner_rect.unwrap_or_else(|| egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))));
+            ui.set_width((screen.width() - 32.0).min(480.0));
+            let body_h = screen.height() - 160.0;
+            egui::ScrollArea::vertical().max_height(body_h).auto_shrink([true, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Settings").size(T_TITLE).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -94,6 +99,7 @@ impl App {
                     }
                 });
             });
+            });
         });
         if modal.should_close() {
             close = true;
@@ -111,7 +117,7 @@ impl App {
         let (saved, total) = (self.model.saved(), self.model.rows.len());
         let (mut quit, mut keep) = (false, false);
         let modal = egui::Modal::new(egui::Id::unique("quit")).backdrop_color(p.backdrop()).show(ctx, |ui| {
-            ui.set_width(440.0);
+            ui.set_width((ctx.input(|i| i.viewport().inner_rect.unwrap_or_else(|| egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))).width()) - 32.0).min(440.0));
             ui.label(RichText::new("Quit while downloading?").size(T_TITLE).strong());
             ui.add_space(S2);
             ui.label(format!(

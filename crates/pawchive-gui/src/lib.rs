@@ -2,6 +2,8 @@
 //! session thread; this binary only draws state and forwards input.
 
 mod app;
+#[cfg(target_os = "android")]
+mod androidpick;
 mod derive;
 mod dev;
 mod format;
@@ -65,6 +67,12 @@ fn open_library() -> Result<pawchive_core::library::Library, String> {
 #[cfg(target_os = "android")]
 static ANDROID_APP: std::sync::Mutex<Option<android_activity::AndroidApp>> =
     std::sync::Mutex::new(None);
+
+/// The stashed activity handle for Android-only code (intents, configs). None on desktop paths.
+#[cfg(target_os = "android")]
+pub(crate) fn android_app() -> Option<android_activity::AndroidApp> {
+    ANDROID_APP.lock().unwrap().clone()
+}
 
 #[cfg(target_os = "android")]
 #[no_mangle]
