@@ -5,11 +5,9 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-# `clipboard` is what links arboard and smithay-clipboard. Without it egui-winit keeps a private
-# in-process clipboard, so Ctrl+V and the middle-click paste read nothing from the system (DAN-1600).
-# On Android arboard has no backend: eframe drops the feature there, and the desktop-only
-# dependency below turns it back on everywhere else through feature unification.
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+# eframe is split per-target below: its Android support is feature-gated AND incompatible with
+# the desktop `accesskit` feature (NativeActivity + accesskit = compile_error), so a shared
+# feature list in [dependencies] would poison the Android build through feature unification.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Only for `localtime_r`, to show "Last scanned" in the user's own time zone (already in the tree via eframe).
 libc = "0.2"
@@ -45,12 +43,15 @@ egui_kittest = "0.37.0"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+# `clipboard` is what links arboard and smithay-clipboard. Without it egui-winit keeps a private
+# in-process clipboard, so Ctrl+V and the middle-click paste read nothing from the system (DAN-1600).
 egui-winit = { version = "0.37.0", features = ["clipboard"] }
-eframe = { version = "0.37.0", features = ["x11", "wayland"] }
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
 # eframe's Android support is feature-gated in 0.37: without `android-native-activity` winit
 # compiles WITHOUT its Android backend, `run_native` fails on launch, and the activity closes
-# itself an instant after the splash — the "app won't open" bug, fixed.
-eframe = { version = "0.37.0", features = ["android-native-activity"] }
+# itself an instant after the splash — the "app won't open" bug, fixed. `accesskit` must stay
+# OFF here: eframe 0.37 compile_errors on NativeActivity+accesskit (it wants GameActivity).
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "android-native-activity"] }
