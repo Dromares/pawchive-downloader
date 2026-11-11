@@ -24,7 +24,7 @@ impl App {
                 ui.label(RichText::new("Settings").size(T_TITLE).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if cfg!(target_os = "android") {
-                        ui.label(dim(p, "Tap outside or Back to close"));
+                        ui.label(dim(p, "Tap outside to close"));
                     } else {
                         ui.label(dim(p, "Esc to close"));
                     }
