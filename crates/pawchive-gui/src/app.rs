@@ -184,7 +184,11 @@ impl App {
             handle,
             rx,
             model: Model::default(),
-            output: settings.output_dir.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+            output: settings
+                .output_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(crate::platform::default_output),
             custom_ext: settings.custom_extensions.clone(),
             saved: settings.clone(),
             sent: settings.clone().normalized(),
@@ -515,6 +519,11 @@ impl App {
         let (tx, ctx) = (self.picker_tx.clone(), ctx.clone());
         // The portal call blocks, so it runs on its own thread and the window keeps repainting.
         std::thread::spawn(move || {
+            // Android has no XDG portal: the output folder is the platform default and the cookie
+            // file stays unset until a picker exists (typed path is a follow-up).
+            #[cfg(target_os = "android")]
+            let path: Option<std::path::PathBuf> = None;
+            #[cfg(not(target_os = "android"))]
             let path = match which {
                 Picker::Output => rfd::FileDialog::new().set_title("Choose the output folder").pick_folder(),
                 Picker::CookieFile => rfd::FileDialog::new().set_title("Choose a cookies.txt file").pick_file(),
@@ -773,6 +782,23 @@ impl App {
             .clone()
             .or_else(|| self.has_folder().then(|| PathBuf::from(self.output.trim())).filter(|p| p.is_dir()));
         let (tx, ctx) = (self.export_tx.clone(), ctx.clone());
+        #[cfg(target_os = "android")]
+        {
+            // No save dialog on Android: the export lands in the output folder (its platform
+            // default when none was picked), named by the menu item that started it.
+            let dir = dir
+                .unwrap_or_else(|| PathBuf::from(crate::platform::default_output()));
+            let path = dir.join(name).with_extension(fmt.ext());
+            std::thread::spawn(move || {
+                let _ = tx.send(std::fs::create_dir_all(&path.parent().unwrap().clone())
+                    .and_then(|()| std::fs::write(&path, bytes))
+                    .map(|()| path)
+                    .map_err(|e| e.to_string()));
+                ctx.request_repaint();
+            });
+            return;
+        }
+        #[cfg(not(target_os = "android"))]
         std::thread::spawn(move || {
             let mut dlg = rfd::FileDialog::new().set_title("Save the list of links").set_file_name(name);
             if let Some(d) = dir {
