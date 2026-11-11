@@ -88,9 +88,16 @@ pub fn main() -> eframe::Result {
     }
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Pawchive Downloader")
-        .with_app_id(APP_ID)
-        .with_inner_size([1120.0, 760.0])
-        .with_min_inner_size([900.0, 600.0]);
+        .with_app_id(APP_ID);
+    // Desktop-only: fixed start size and a minimum the user can't shrink below. On Android the
+    // window is the whole screen and a phone's viewport (≈500 logical dp tall in landscape) can
+    // be SMALLER than a 900x600 minimum, so a hard min risks refusing to create the window.
+    #[cfg(not(target_os = "android"))]
+    {
+        viewport = viewport
+            .with_inner_size([1120.0, 760.0])
+            .with_min_inner_size([900.0, 600.0]);
+    }
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }
