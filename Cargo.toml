@@ -7,6 +7,3 @@ version = "0.3.0"
 edition = "2021"
 publish = false
 
-[profile.release]
-# Keep symbols so Android panic backtraces name functions (crash triage from logcat).
-debug = "line-tables-only"
