@@ -181,6 +181,10 @@ impl App {
                 }
             }
         });
+        #[cfg(target_os = "android")]
+        if self.share_waiting {
+            ui.label(dim(p, "Got your shared link. It fills in when this run finishes."));
+        }
         if let Some(e) = &self.url_error {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(WARN).color(p.bad));

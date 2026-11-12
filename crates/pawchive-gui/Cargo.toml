@@ -44,9 +44,11 @@ egui_kittest = "0.37.0"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 # `clipboard` is what links arboard and smithay-clipboard. Without it egui-winit keeps a private
-# in-process clipboard, so Ctrl+V and the middle-click paste read nothing from the system (DAN-1600).
+# in-process clipboard, so Ctrl+V and the middle-click paste read nothing from the system (DAN-1600;
+# urlmenu's eframe_keeps_the_clipboard_feature test guards this exact line). Desktop-only: arboard
+# has no Android backend, so the Android eframe line below leaves it out.
 egui-winit = { version = "0.37.0", features = ["clipboard"] }
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "x11", "wayland"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }

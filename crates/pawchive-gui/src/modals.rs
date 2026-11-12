@@ -13,7 +13,7 @@ impl App {
         let picking = self.picker_busy;
         let mut acts: Vec<Action> = Vec::new();
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("settings")).backdrop_color(p.backdrop()).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("settings")).backdrop_color(p.backdrop()).show(ctx, |ui| {
             // Phone widths are smaller than the desktop dialog: fit the screen, and scroll the
             // body when it is taller than the screen (landscape phones especially).
             let screen = self.screen_rect;
@@ -120,7 +120,7 @@ impl App {
     pub(crate) fn quit_modal(&mut self, ctx: &egui::Context, p: &Pal) {
         let (saved, total) = (self.model.saved(), self.model.rows.len());
         let (mut quit, mut keep) = (false, false);
-        let modal = egui::Modal::new(egui::Id::new("quit")).backdrop_color(p.backdrop()).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("quit")).backdrop_color(p.backdrop()).show(ctx, |ui| {
             ui.set_width((self.screen_rect.width() - 32.0).min(440.0));
             ui.label(RichText::new("Quit while downloading?").size(T_TITLE).strong());
             ui.add_space(S2);

@@ -1,255 +1,152 @@
-//! Reading the Android system clipboard from a no-Java NativeActivity app (DAN-1600's Android twin).
+//! Text entry on Android, for a NativeActivity app the soft keyboard cannot reach (winit 0.30's
+//! Android backend implements no InputConnection, so keyboard commits never arrive). Two doors:
 //!
-//! Desktop paste rides egui-winit's `clipboard` feature (arboard); neither arboard nor the system
-//! "Paste" menu exists here, so the link field had no paste route at all on a phone. This calls
-//! `ClipboardManager.getPrimaryClip()` through JNI against the activity handle that `android-activity`
-//! already stashed (`ndk_context`), exactly like the TLS fix reached around the missing Java layer.
-//!
-//! Reading needs no permission: Android 10+ only restricts background reads, and this runs in the
-//! focused activity, from the UI thread, on an explicit button press.
+//! * **Share / tapped link**: `ShareImportActivity`, the APK's small Java shim, writes the shared
+//!   text to `<filesDir>/shared_link` and brings the already-running app forward;
+//!   [`take_shared_link`] consumes it. A file, not an Intent, on purpose: NativeActivity never
+//!   sees new Intents, and relaunching it to deliver one starts a second winit `EventLoop` in the
+//!   same process, which winit refuses ("EventLoop can't be recreated"); the process then exits
+//!   and takes any running download with it.
+//! * **Paste button**: [`clipboard_text`] reads `ClipboardManager` over JNI (the Android twin of
+//!   DAN-1600's desktop paste). Android may refuse the read under its focus rules, and a refused
+//!   read looks exactly like an empty clipboard.
 
-/// The current clipboard text, `None` when the clipboard is empty, holds a non-text clip, or the
-/// JNI walk fails. A non-empty single-line text clip becomes the returned `String` as-is.
+/// The file the Java share shim writes. Keep in sync with `ShareImportActivity.HANDOFF`.
+#[cfg(target_os = "android")]
+const HANDOFF: &str = "shared_link";
+
+/// `<filesDir>/shared_link`: android-activity's internal data path IS the Java `getFilesDir()`.
+#[cfg(target_os = "android")]
+fn handoff_path() -> Option<std::path::PathBuf> {
+    Some(crate::android_app()?.internal_data_path()?.join(HANDOFF))
+}
+
+/// A shared link is waiting (it arrived mid-scan/download and must not clobber the run).
+#[cfg(target_os = "android")]
+pub fn shared_link_waiting() -> bool {
+    handoff_path().is_some_and(|p| p.exists())
+}
+
+/// The shared link, consumed (read, then deleted). `None` when nothing is waiting.
+#[cfg(target_os = "android")]
+pub fn take_shared_link() -> Option<String> {
+    let path = handoff_path()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    link_from_shared_text(&raw)
+}
+
+/// Browsers share "Page title https://…": keep the first http(s) link, minus trailing punctuation.
+/// Text with no link in it comes back trimmed, so the link field's own check can explain why it
+/// isn't a Pawchive link instead of the share silently doing nothing.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn link_from_shared_text(raw: &str) -> Option<String> {
+    let start = [raw.find("https://"), raw.find("http://")].into_iter().flatten().min();
+    let link = match start {
+        Some(i) => {
+            let tail = &raw[i..];
+            let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+            tail[..end]
+                .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '>' | '"' | '\''))
+                .to_owned()
+        }
+        None => raw.trim().to_owned(),
+    };
+    (!link.is_empty()).then_some(link)
+}
+
+/// The clipboard's text: `None` when it is empty, Android refused the read, or the JNI walk failed.
 #[cfg(target_os = "android")]
 pub fn clipboard_text() -> Option<String> {
-    use jni::objects::{JObject, JValue};
-
-    // SAFETY: `java_vm`/`android_context` hand back the pointers the activity registered at startup;
-    // they are live for the whole process, and this runs on the activity's own thread.
+    // SAFETY: ndk_context holds the process's JavaVM and Application object for the whole process
+    // lifetime, and this runs on winit's main thread, which is attached to the JVM.
     unsafe {
         let rt = ndk_context::android_context();
         let vm = jni::JavaVM::from_raw(rt.vm() as *mut jni::sys::JavaVM).ok()?;
-        // As daemon: the guard must NOT detach on drop — this thread belongs to winit, not to us.
+        // As daemon: the guard must NOT detach on drop, because this thread belongs to winit.
         let mut env = vm.attach_current_thread_as_daemon().ok()?;
-        let activity = JObject::from_raw(rt.context() as jni::sys::jobject);
-
-        let service = env.new_string("clipboard").ok()?;
-        let manager = env
-            .call_method(
-                &activity,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[(&service).into()],
-            )
-            .ok()?
-            .l()
-            .ok()?;
-        if manager.is_null() {
-            return None;
+        let app_ctx = rt.context() as jni::sys::jobject; // the Application object: a Context
+        // This thread never returns to Java, so a plain local ref would live forever (jni 0.21's
+        // JObject frees nothing on drop). A local frame frees everything made inside it.
+        let text = env
+            .with_local_frame(16, |env| -> jni::errors::Result<Option<String>> { Ok(read_clipboard(env, app_ctx)) })
+            .ok()
+            .flatten();
+        // Never leave a Java exception pending on winit's thread: the next JNI call, ours or
+        // android-activity's, would abort the whole process.
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
         }
-        let clip = match env.call_method(&manager, "getPrimaryClip", "()Landroid/content/ClipData;", &[]) {
-            Ok(v) => v.l().map_err(|e| dbgline(&format!("RD clipconv {e}"))).ok()?,
-            Err(e) => {
-                dbgline(&format!("RD getPrimaryClip ERR {e}"));
-                return None;
-            }
-        };
-        if clip.is_null() {
-            dbgline("RD clip_null");
-            return None; // empty clipboard
-        }
-        // Walk ClipData properly: getItemAt(0) -> Item.getText()/coerceToText(Context).
-        // Method IDs resolved explicitly so a bad signature shows up as a logged
-        // NoSuchMethodError instead of vanishing into `?` (every failed JNI call leaves a
-        // PENDING Java exception that poisons the whole thread until drained).
-        let jargs = [jni::sys::jvalue { i: 0 }];
-        let item = match env.get_method_id("android/content/ClipData", "getItemAt", "(I)Landroid/content/ClipData$Item;")
-            .and_then(|mid| env.call_method_unchecked(&clip, mid, jni::signature::ReturnType::Object, &jargs))
-        {
-            Ok(v) => {
-                if let Some(Some(msg)) = drain_exception(&mut env) {
-                    dbgline(&format!("RD getItemAt EXC {msg}"));
-                    return None;
-                }
-                match v.l() {
-                    Ok(o) => o,
-                    Err(e) => {
-                        dbgline(&format!("RD itemconv ERR {e}"));
-                        return None;
-                    }
-                }
-            }
-            Err(e) => {
-                dbgline(&format!("RD getItemAt ERR {e}"));
-                if let Some(Some(msg)) = drain_exception(&mut env) {
-                    dbgline(&format!("RD getItemAt EXC {msg}"));
-                }
-                return None;
-            }
-        };
-        if item.is_null() {
-            dbgline("RD item_null");
-            return None;
-        }
-        let app_ctx = JObject::from_raw(rt.context() as jni::sys::jobject); // Application IS a Context
-        let cs = match env.get_method_id("android/content/ClipData$Item", "coerceToText", "(Landroid/content/Context;)Ljava/lang/CharSequence;")
-            .and_then(|mid| {
-                let jargs = [jni::sys::jvalue { l: app_ctx.as_raw() }];
-                env.call_method_unchecked(&item, mid, jni::signature::ReturnType::Object, &jargs)
-            })
-        {
-            Ok(v) => {
-                if let Some(Some(msg)) = drain_exception(&mut env) {
-                    dbgline(&format!("RD item.coerce EXC {msg}"));
-                    return None;
-                }
-                match v.l() {
-                    Ok(o) => o,
-                    Err(e) => {
-                        dbgline(&format!("RD csconv ERR {e}"));
-                        return None;
-                    }
-                }
-            }
-            Err(e) => {
-                dbgline(&format!("RD item.coerce ERR {e}"));
-                if let Some(Some(msg)) = drain_exception(&mut env) {
-                    dbgline(&format!("RD item.coerce EXC {msg}"));
-                }
-                return None;
-            }
-        };
-        if cs.is_null() {
-            dbgline("RD cs_null");
-            return None;
-        }
-        let string = env.call_method(&cs, "toString", "()Ljava/lang/String;", &[]).ok()?.l().ok()?;
-        let jstr = jni::objects::JString::from_raw(string.into_raw()); // must outlive the borrow below
-        let text: String = env.get_string(&jstr).ok()?.into(); // JavaString: copies the UTF-16 into Rust
-        dbgline(&format!("RD ok len={}", text.chars().count()));
-        (!text.is_empty()).then_some(text)
+        text
     }
 }
 
-/// TEST-ONLY (and harmless forever): places `text` on the system clipboard via
-/// `ClipboardManager.setPrimaryClip`. The emulator image has no scriptable way to fill the
-/// clipboard, so the read path above is verified by writing through this same JNI surface.
+/// getSystemService("clipboard") -> getPrimaryClip() -> getItemAt(0) -> Item.coerceToText(ctx).
+/// Every signature here uses `java/lang/CharSequence`; an `android/text/...` typo throws
+/// NoSuchMethodError, which is exactly how the first version of this walk silently returned None.
 #[cfg(target_os = "android")]
-/// Test hook for driving clipboard scenarios from adb; never called in the shipped flow.
-#[allow(dead_code)]
-pub fn set_clipboard_text(text: &str) -> Option<()> {
-    use jni::objects::{JObject, JValue};
+unsafe fn read_clipboard(env: &mut jni::JNIEnv<'_>, app_ctx: jni::sys::jobject) -> Option<String> {
+    use jni::objects::{JObject, JString, JValue};
 
-    unsafe {
-        let rt = ndk_context::android_context();
-        let vm = jni::JavaVM::from_raw(rt.vm() as *mut jni::sys::JavaVM).ok()?;
-        let mut env = vm.attach_current_thread_as_daemon().ok()?;
-        let activity = JObject::from_raw(rt.context() as jni::sys::jobject);
+    let ctx = JObject::from_raw(app_ctx);
+    let service = env.new_string("clipboard").ok()?;
+    let manager = env
+        .call_method(&ctx, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", &[JValue::Object(&service)])
+        .ok()?
+        .l()
+        .ok()?;
+    if manager.is_null() {
+        return None;
+    }
+    let clip = env.call_method(&manager, "getPrimaryClip", "()Landroid/content/ClipData;", &[]).ok()?.l().ok()?;
+    if clip.is_null() {
+        return None; // empty, or Android refused the read
+    }
+    let item = env
+        .call_method(&clip, "getItemAt", "(I)Landroid/content/ClipData$Item;", &[JValue::Int(0)])
+        .ok()?
+        .l()
+        .ok()?;
+    if item.is_null() {
+        return None;
+    }
+    // coerceToText lives on ClipData.Item (not ClipData) and turns URI/Intent clips into text too.
+    let chars = env
+        .call_method(&item, "coerceToText", "(Landroid/content/Context;)Ljava/lang/CharSequence;", &[JValue::Object(&ctx)])
+        .ok()?
+        .l()
+        .ok()?;
+    if chars.is_null() {
+        return None;
+    }
+    let string = JString::from(env.call_method(&chars, "toString", "()Ljava/lang/String;", &[]).ok()?.l().ok()?);
+    let text: String = env.get_string(&string).ok()?.into();
+    let text = text.trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
 
-        let service = env.new_string("clipboard").ok()?;
-        let manager = env
-            .call_method(
-                &activity,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[(&service).into()],
-            )
-            .ok()?
-            .l()
-            .ok()?;
-        if manager.is_null() {
-            return None;
-        }
-        let label = env.new_string("pawchive").ok()?;
-        let chars = env.new_string(text).ok()?;
-        let clip = env
-            .call_static_method(
-                "android/content/ClipData",
-                "newPlainText",
-                "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;",
-                &[(&label).into(), (&chars).into()],
-            )
-            .ok()?
-            .l()
-            .ok()?;
-        let set = env.call_method(&manager, "setPrimaryClip", "(Landroid/content/ClipData;)V", &[JValue::Object(&clip).into()]);
-        if let Some(Some(msg)) = drain_exception(&mut env) {
-            dbgline(&format!("SET exc {msg}"));
-        }
-        set.is_ok().then_some(())
+#[cfg(test)]
+mod tests {
+    use super::link_from_shared_text as pick;
+
+    #[test]
+    fn keeps_only_the_link_from_a_browser_share() {
+        let shared = "ElysianRagazza | Pawchive https://pawchive.pw/patreon/user/163211671";
+        assert_eq!(pick(shared).as_deref(), Some("https://pawchive.pw/patreon/user/163211671"));
+        assert_eq!(pick("https://pawchive.pw/fanbox/user/1386751\n").as_deref(), Some("https://pawchive.pw/fanbox/user/1386751"));
+        assert_eq!(pick("look (https://pawchive.pw/patreon/user/5).").as_deref(), Some("https://pawchive.pw/patreon/user/5"));
+        assert_eq!(pick("http://pawchive.pw/patreon/user/5?o=50 more").as_deref(), Some("http://pawchive.pw/patreon/user/5?o=50"));
+    }
+
+    #[test]
+    fn the_earliest_link_wins() {
+        let two = "first http://pawchive.pw/patreon/user/1 then https://pawchive.pw/patreon/user/2";
+        assert_eq!(pick(two).as_deref(), Some("http://pawchive.pw/patreon/user/1"));
+    }
+
+    #[test]
+    fn text_without_a_link_passes_through_trimmed() {
+        assert_eq!(pick("  just words  ").as_deref(), Some("just words"));
+        assert_eq!(pick(" \n "), None);
     }
 }
-
-/// The link entry point on Android — soft keyboards cannot deliver text to this app (winit's
-/// Android backend has no InputConnection), so links ride Intents: browser "Share → Pawchive
-/// Downloader" (ACTION_SEND text/plain) or a tapped link (ACTION_VIEW). Returns the URL out of
-/// EXTRA_TEXT (Chrome sometimes prefixes the page title, so the first http(s) token wins) or
-/// getDataString().
-
-#[cfg(target_os = "android")]
-pub fn intent_url() -> Option<String> {
-    use jni::objects::JObject;
-
-    let jstring = |env: &mut jni::JNIEnv<'_>, obj: jni::objects::JObject<'_>| -> Option<String> {
-        let jstr = unsafe { jni::objects::JString::from_raw(obj.into_raw()) }; // must outlive the borrow
-        env.get_string(&jstr).ok().map(String::from)
-    };
-    let app = crate::android_app()?;
-    // IMPORTANT (crashed android.8 first attempt): `ndk_context` registers the APPLICATION object,
-    // which has no `getIntent()` — the Intent lives on the ACTIVITY, reachable through
-    // android-activity's `activity_as_ptr()`. Clipboard calls stay on the Application object
-    // (getSystemService is a Context method, so both work there).
-    unsafe {
-        let vm = jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM).ok()?;
-        let mut env = vm.attach_current_thread_as_daemon().ok()?;
-        let activity = JObject::from_raw(app.activity_as_ptr() as jni::sys::jobject);
-        let intent = match env.call_method(&activity, "getIntent", "()Landroid/content/Intent;", &[]) {
-            Ok(v) => v.l().ok()?,
-            Err(_) => return None,
-        };
-        if intent.is_null() {
-            return None;
-        }
-        let key = env.new_string("android.intent.extra.TEXT").ok()?;
-        let extra = env
-            .call_method(&intent, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;", &[(&key).into()])
-            .ok()?
-            .l()
-            .ok()?;
-        let shared = (!extra.is_null()).then(|| jstring(&mut env, extra)).flatten();
-        let data = env.call_method(&intent, "getDataString", "()Ljava/lang/String;", &[]).ok()?.l().ok()?;
-        let viewed = (!data.is_null()).then(|| jstring(&mut env, data)).flatten();
-        let raw = shared.or(viewed)?;
-        let url = raw
-            .split_whitespace()
-            .find(|t| t.starts_with("http"))
-            .map(str::to_owned)
-            .unwrap_or_else(|| raw.trim().to_owned());
-        (!url.is_empty()).then_some(url)
-    }
-}
-
-/// Same intent only surfaces once, so clearing the field does not fight a zombie prefill.
-#[cfg(target_os = "android")]
-static LAST_IMPORT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-#[cfg(target_os = "android")]
-pub fn fresh_intent_url() -> Option<String> {
-    let url = intent_url()?;
-    let mut last = LAST_IMPORT.lock().unwrap();
-    (last.as_deref() != Some(url.as_str())).then(|| {
-        *last = Some(url.clone());
-        url
-    })
-}
-
-/// Pull any PENDING Java exception off the thread and render it — mandatory hygiene here:
-/// a failed JNI call leaves the exception pending, and every later JNI call on this thread
-/// (including intent reads!) then fails with "unexpected pending exception" until drained.
-#[cfg(target_os = "android")]
-unsafe fn drain_exception(env: &mut jni::JNIEnv<'_>) -> Option<Option<String>> {
-    let t = env.exception_occurred().ok()?;
-    if t.is_null() {
-        return Some(None);
-    }
-    env.exception_clear().ok()?;
-    let s = env.call_method(&t, "toString", "()Ljava/lang/String;", &[]).ok()?.l().ok()?;
-    let jstr = jni::objects::JString::from_raw(s.into_raw());
-    let owned: String = env.get_string(&jstr).ok()?.into();
-    Some(Some(owned))
-}
-
-/// Failure breadcrumbs for the clipboard path; swallowed on purpose (UI shows one honest hint).
-#[cfg(target_os = "android")]
-fn dbgline(_s: &str) {}
-

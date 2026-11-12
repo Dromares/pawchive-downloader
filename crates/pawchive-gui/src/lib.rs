@@ -4,7 +4,6 @@
 mod app;
 #[cfg(target_os = "android")]
 mod androidpick;
-#[cfg(target_os = "android")]
 mod paste;
 mod derive;
 mod dev;
@@ -78,6 +77,7 @@ pub(crate) fn android_app() -> Option<android_activity::AndroidApp> {
 
 #[cfg(target_os = "android")]
 #[no_mangle]
+#[allow(improper_ctypes_definitions)] // android-activity's own entry-point contract (Rust-to-Rust)
 extern "C" fn android_main(app: android_activity::AndroidApp) {
     *ANDROID_APP.lock().unwrap() = Some(app);
     // On Android stderr lands in logcat, so a swallowed `eframe::Error` must be written there

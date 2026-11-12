@@ -126,6 +126,9 @@ pub struct App {
     sent: Settings,
     pub(crate) url: String,
     pub(crate) url_error: Option<String>,
+    /// Android: a shared link arrived while a scan/download runs; it waits in its file until idle.
+    #[cfg(target_os = "android")]
+    pub(crate) share_waiting: bool,
     pub(crate) output: String,
     pub(crate) custom_ext: String,
     pub(crate) checked: HashSet<Category>,
@@ -142,6 +145,7 @@ pub struct App {
     focus_url: bool,
     summary_cache: Option<(u64, String, Arc<FileSummary>)>,
     ready_cache: Option<(String, Arc<Vec<ReadyRow>>)>,
+    #[cfg_attr(target_os = "android", allow(dead_code))] // desktop file dialogs only (rfd)
     picker_tx: Sender<(Picker, Option<PathBuf>)>,
     picker_rx: Receiver<(Picker, Option<PathBuf>)>,
     pub(crate) picker_busy: bool,
@@ -202,6 +206,8 @@ impl App {
             settings,
             url: String::new(),
             url_error: None,
+            #[cfg(target_os = "android")]
+            share_waiting: false,
             checked: derive::default_checked(),
             include_preview: false, // thumbnails are opt-in
             tab: Tab::Files,
@@ -817,7 +823,7 @@ impl App {
                 .unwrap_or_else(|| PathBuf::from(crate::platform::default_output()));
             let path = dir.join(name).with_extension(fmt.ext());
             std::thread::spawn(move || {
-                let _ = tx.send(std::fs::create_dir_all(&path.parent().unwrap().clone())
+                let _ = tx.send(path.parent().map_or(Ok(()), std::fs::create_dir_all)
                     .and_then(|()| std::fs::write(&path, bytes))
                     .map(|()| path)
                     .map_err(|e| e.to_string()));
@@ -980,12 +986,18 @@ impl App {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.screen_rect = ui.max_rect();
-        // Android text entry, the only kind that works: a soft keyboard cannot reach a
-        // NativeActivity Rust app (see paste.rs), so links arrive from Share/VIEW intents.
+        // Android: links arrive from browser Share / a tapped pawchive.pw link through a file the
+        // Java shim writes (see paste.rs). A plain file check per frame, no JNI. A link that
+        // lands mid-run waits until the run is over instead of swapping the field under it.
         #[cfg(target_os = "android")]
-        if let Some(link) = crate::paste::fresh_intent_url() {
-            self.url = link;
-            self.url_error = None;
+        if self.url_editable() {
+            if let Some(link) = crate::paste::take_shared_link() {
+                self.url = link;
+                self.url_error = None;
+            }
+            self.share_waiting = false;
+        } else {
+            self.share_waiting = crate::paste::shared_link_waiting();
         }
         let pal = Pal::new(ctx.theme().into());
         self.dev_hooks(&ctx);
