@@ -6,4 +6,4 @@ members = ["crates/pawchive-core", "crates/pawchive-gui"]
 version = "0.3.0"
 edition = "2021"
 publish = false
-
+license = "MIT"

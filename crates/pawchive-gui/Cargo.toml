@@ -3,6 +3,7 @@ name = "pawchive-gui"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 # eframe is split per-target below: its Android support is feature-gated AND incompatible with
