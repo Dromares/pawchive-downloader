@@ -6,17 +6,19 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
-# `clipboard` is what links arboard and smithay-clipboard. Without it egui-winit keeps a private
-# in-process clipboard, so Ctrl+V and the middle-click paste read nothing from the system (DAN-1600).
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wayland", "x11"] }
+# eframe is split per-target below: its Android support is feature-gated AND incompatible with
+# the desktop `accesskit` feature (NativeActivity + accesskit = compile_error), so a shared
+# feature list in [dependencies] would poison the Android build through feature unification.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Only for `localtime_r`, to show "Last scanned" in the user's own time zone (already in the tree via eframe).
 libc = "0.2"
-pawchive-core = { version = "0.3.0", path = "../pawchive-core" }
-rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+pawchive-core = { version = "0.4.0", path = "../pawchive-core" }
 
 # The binary is named after the app id (see `APP_ID` in `src/main.rs`) so that the desktop entry,
 # the icon name and the window's Wayland app_id / X11 WM_CLASS all agree.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [[bin]]
 name = "pawchive-downloader"
 path = "src/main.rs"
@@ -39,3 +41,23 @@ desktop-template = "assets/pawchive-downloader.desktop"
 
 [dev-dependencies]
 egui_kittest = "0.37.0"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+# `clipboard` is what links arboard and smithay-clipboard. Without it egui-winit keeps a private
+# in-process clipboard, so Ctrl+V and the middle-click paste read nothing from the system (DAN-1600;
+# urlmenu's eframe_keeps_the_clipboard_feature test guards this exact line). Desktop-only: arboard
+# has no Android backend, so the Android eframe line below leaves it out.
+egui-winit = { version = "0.37.0", features = ["clipboard"] }
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "x11", "wayland"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+# Paste button: ClipboardManager over JNI (see src/paste.rs); ndk-context hands us the activity.
+jni = "0.21"
+ndk-context = "0.1.1"
+# eframe's Android support is feature-gated in 0.37: without `android-native-activity` winit
+# compiles WITHOUT its Android backend, `run_native` fails on launch, and the activity closes
+# itself an instant after the splash — the "app won't open" bug, fixed. `accesskit` must stay
+# OFF here: eframe 0.37 compile_errors on NativeActivity+accesskit (it wants GameActivity).
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "android-native-activity"] }

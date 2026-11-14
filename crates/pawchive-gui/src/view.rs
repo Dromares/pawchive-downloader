@@ -121,7 +121,13 @@ impl App {
         let updating_link = self.updating_link();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = S2;
-            let w = ui.available_width() - 76.0 - S2;
+            // Android-only: a phone has neither right-click nor a system Paste menu, so the row gets
+            // its own Paste button (src/paste.rs reads ClipboardManager over JNI).
+            #[cfg(target_os = "android")]
+            let paste_w = 64.0;
+            #[cfg(not(target_os = "android"))]
+            let paste_w = 0.0;
+            let w = ui.available_width() - 76.0 - S2 - paste_w - if paste_w > 0.0 { S2 } else { 0.0 };
             let has_error = self.url_error.is_some();
             let resp = ui
                 .scope(|ui| {
@@ -161,10 +167,27 @@ impl App {
                     acts.push(Action::Scan);
                 }
             }
+            #[cfg(target_os = "android")]
+            if secondary(ui, "Paste", paste_w, editable).clicked() {
+                match crate::paste::clipboard_text() {
+                    Some(text) => {
+                        self.url = text;
+                        self.url_error = None;
+                    }
+                    None => self.url_error = Some(
+                        "Clipboard is empty (or Android refused the read) - copy the link first, or use browser Share."
+                            .to_owned(),
+                    ),
+                }
+            }
         });
+        #[cfg(target_os = "android")]
+        if self.share_waiting {
+            ui.label(dim(p, "Got your shared link. It fills in when this run finishes."));
+        }
         if let Some(e) = &self.url_error {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("⚠").color(p.bad));
+                ui.label(RichText::new(WARN).color(p.bad));
                 ui.label(RichText::new(e).color(p.bad).size(T_SMALL));
             });
         } else if self.saved_hint(ui, p, acts) {
@@ -194,7 +217,12 @@ impl App {
                 );
             }
         } else {
-            ui.label(dim(p, "Paste a link, then press Scan (Enter)."));
+            let hint = if cfg!(target_os = "android") {
+                "Share the page to Pawchive Downloader (browser Share button), or tap Paste; then Scan."
+            } else {
+                "Paste a link, then press Scan (Enter)."
+            };
+            ui.label(dim(p, hint));
         }
         if self.model.library_on() && self.model.saved.is_some() && self.model.phase != Phase::Empty {
             let can = !self.model.phase.busy();
@@ -535,7 +563,7 @@ impl App {
                 let page = f.map_or(1, |f| f.progress.pages + 1);
                 let cause = f.map(|f| explain_scan_error(&f.message, m.posts)).unwrap_or_default();
                 card(ui, p, p.bad, |ui| {
-                    card_head(ui, p, Lead::Glyph("⚠", p.bad), &format!("Scan stopped at page {page}"), None);
+                    card_head(ui, p, Lead::Glyph(WARN, p.bad), &format!("Scan stopped at page {page}"), None);
                     ui.add(egui::Label::new(cause).truncate());
                     // The session cannot resume a scan from an offset, so the card says what Scan again does.
                     ui.label(dim(p, "Scan again starts over from the first page; the posts found so far aren't kept."));
@@ -568,7 +596,7 @@ impl App {
                 // The card is green only while it has nothing to warn about.
                 let stripe = if gone > 0 { p.warn } else { p.ok };
                 card(ui, p, stripe, |ui| {
-                    card_head(ui, p, Lead::Glyph(if gone > 0 { "⚠" } else { "✓" }, stripe), &title, None);
+                    card_head(ui, p, Lead::Glyph(if gone > 0 { WARN } else { OK }, stripe), &title, None);
                     if all == 0 && n_links == 0 {
                         ui.label(if one_post {
                             "No files or links found in this post."
@@ -658,7 +686,7 @@ impl App {
                     card_head(
                         ui,
                         p,
-                        Lead::Glyph("⚠", p.warn),
+                        Lead::Glyph(WARN, p.warn),
                         "The site asked us to slow down",
                         Some(format!("resuming in {s} s")),
                     );
@@ -722,7 +750,7 @@ impl App {
                 let failed = m.failed();
                 let title = format!("Finished with {}", derive::problems(failed));
                 card(ui, p, p.warn, |ui| {
-                    card_head(ui, p, Lead::Glyph("⚠", p.warn), &title, Some(counter));
+                    card_head(ui, p, Lead::Glyph(WARN, p.warn), &title, Some(counter));
                     bar(ui, saved as f32 / total.max(1) as f32, p.warn);
                     ui.label(format!(
                         "{saved} files saved ({}) in {}. {failed} failed.{}",
@@ -736,7 +764,7 @@ impl App {
             Phase::Finished => {
                 let folder = self.folder_hint();
                 card(ui, p, p.ok, |ui| {
-                    card_head(ui, p, Lead::Glyph("✓", p.ok), "Finished — everything was saved", Some(counter));
+                    card_head(ui, p, Lead::Glyph(OK, p.ok), "Finished — everything was saved", Some(counter));
                     bar(ui, 1.0, p.ok);
                     ui.label(derive::finished_line(
                         m.saved() - m.skipped(),
@@ -840,7 +868,7 @@ impl App {
                         ui.scope_builder(
                             egui::UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)),
                             |ui| {
-                                ui.label(RichText::new("⚠").color(p.warn).strong());
+                                ui.label(RichText::new(WARN).color(p.warn).strong());
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 2.0;
                                     ui.add(
@@ -961,7 +989,7 @@ impl App {
                                 ui.label(num(hms_utc(l.unix)).color(p.ink_dim));
                                 let (g, c) = match l.level {
                                     Level::Info => ("·", p.ink_dim),
-                                    Level::Warn => ("⚠", p.warn),
+                                    Level::Warn => (WARN, p.warn),
                                     Level::Error => ("×", p.bad),
                                 };
                                 ui.label(RichText::new(g).color(c));
@@ -1469,13 +1497,9 @@ fn row_look(p: &Pal, r: &Row, phase: Phase, slow: bool, now: Instant) -> RowLook
                 sized: false,
             }
         }
-        RowState::Done => {
-            RowLook { glyph: Glyph::Text("✓"), color: p.ok, text: "Done".into(), bar: None, sized: false }
-        }
+        RowState::Done => RowLook { glyph: Glyph::Text(OK), color: p.ok, text: "Done".into(), bar: None, sized: false },
         RowState::Skipped => {
-            RowLook {
-                glyph: Glyph::Text("✓"), color: p.ink_dim, text: "Already saved".into(), bar: None, sized: false
-            }
+            RowLook { glyph: Glyph::Text(OK), color: p.ink_dim, text: "Already saved".into(), bar: None, sized: false }
         }
         RowState::Failed { .. } => {
             RowLook { glyph: Glyph::Text("×"), color: p.bad, text: "Failed".into(), bar: None, sized: false }

@@ -103,6 +103,11 @@ impl Pal {
 }
 
 // Type scale (points).
+/// egui's default font has no warning/check glyphs on the Android build (they render as tofu
+/// rectangles on the phone), so the phone gets ASCII stand-ins while desktop keeps the real ones.
+pub const WARN: &str = if cfg!(target_os = "android") { "!" } else { "\u{26a0}" };
+pub const OK: &str = if cfg!(target_os = "android") { "OK" } else { "\u{2713}" };
+
 pub const T_TITLE: f32 = 20.0;
 pub const T_BODY: f32 = 14.0;
 pub const T_SMALL: f32 = 12.5;

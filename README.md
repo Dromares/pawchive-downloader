@@ -1,11 +1,13 @@
 # Pawchive Downloader
 
-A Rust-only desktop app for downloading a creator's files from [Pawchive](https://pawchive.pw).
+A Rust-only app for downloading a creator's files from [Pawchive](https://pawchive.pw), for the Linux
+desktop and (since 0.4.0) Android.
 
 - `crates/pawchive-core`: API client, file model, classification, naming, download engine and the
   command/event session layer. No GUI dependencies.
 - `crates/pawchive-gui`: the `eframe`/`egui` front end. It only draws state and forwards input; all
   network work runs on a tokio runtime on a separate thread.
+- `android/`: the Gradle project that packages the GUI crate as an Android APK (see [Android](#android)).
 - `fixtures/`: saved public API responses used by the offline tests.
 - `recon.md`: notes on how the site delivers posts and files.
 
@@ -72,6 +74,40 @@ Needs a Rust toolchain and a C compiler (rustls' `aws-lc-rs` builds a small C li
 picker uses the XDG desktop portal through `rfd` (no GTK). Tests use saved fixtures and an in-process
 mock server; they never touch the network.
 
+## Android
+
+The same app runs on Android phones (arm64, Android 8.0 / API 26 or newer). It is a sideload build:
+install the APK from the release page; it is not on Google Play.
+
+- **Getting a link in.** The Android build cannot take keyboard input (the soft keyboard never reaches
+  the app), so links come in two ways: open the creator's page in your browser and use **Share** →
+  **Pawchive Downloader**, or copy the link and tap **Paste** next to the link field. A link shared while a
+  scan or download is running waits and fills in when the run finishes; the running download is not
+  interrupted. Tapped `pawchive.pw` links can open the app too once you allow it under
+  *App info → Open by default → Add link*.
+- **Where files go.** By default, `Android/data/pw.pawchive.downloader/files/pawchive/` on the
+  phone's storage, which any file manager can open without extra permissions. To pick another folder (for
+  example `Download/`) the in-app folder browser needs *Settings → Apps → Special access → All files access →
+  Pawchive Downloader → Allow*; it tells you when a folder is blocked.
+- **Closing dialogs.** Tap outside a dialog to close it. Back sends the app to the background.
+- Exports (`Export list`) are written to the output folder instead of a save dialog.
+
+### Building the APK
+
+Needs the Rust targets (`rustup target add aarch64-linux-android x86_64-linux-android`),
+[`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk), an Android SDK with an NDK, and JDK 17-21:
+
+```
+export ANDROID_HOME=~/Android/Sdk ANDROID_NDK_HOME=~/Android/Sdk/ndk/<version> JAVA_HOME=<jdk 21>
+scripts/build-android.sh                          # arm64-v8a, for phones
+ABIS="arm64-v8a x86_64" scripts/build-android.sh  # also x86_64, for the emulator
+```
+
+The APK lands in `target/android/PawchiveDownloader-<version>.apk`, with the unstripped native library
+per ABI in `target/android/symbols/` for symbolizing crash addresses. The app's version comes from the
+Cargo workspace. Release APKs are signed with the build machine's debug key; an APK signed with a
+different key cannot update an installed one (uninstall first).
+
 ## Building the AppImage
 
 The release AppImage is built inside an Ubuntu 22.04 root filesystem, so the binary only needs glibc
@@ -117,8 +153,8 @@ is any empty directory with about 6 GB free.
    ```
    $IN cargo build --release
    $IN cargo packager --release --formats appimage
-   cp $REPO/target/release/pawchive-downloader_0.3.0_x86_64.AppImage $WORK/pawchive-downloader-0.3.0-x86_64.AppImage
-   cd $WORK && sha256sum pawchive-downloader-0.3.0-x86_64.AppImage > pawchive-downloader-0.3.0-x86_64.AppImage.sha256
+   cp $REPO/target/release/pawchive-downloader_0.4.0_x86_64.AppImage $WORK/pawchive-downloader-0.4.0-x86_64.AppImage
+   cd $WORK && sha256sum pawchive-downloader-0.4.0-x86_64.AppImage > pawchive-downloader-0.4.0-x86_64.AppImage.sha256
    ```
 
    The packager settings are in `crates/pawchive-gui/Cargo.toml` (`[package.metadata.packager]`); the icons
@@ -128,7 +164,7 @@ is any empty directory with about 6 GB free.
 
    ```
    objdump -T $REPO/target/release/pawchive-downloader | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1   # GLIBC_2.35
-   $WORK/pawchive-downloader-0.3.0-x86_64.AppImage --appimage-extract     # unpacks to ./squashfs-root
+   $WORK/pawchive-downloader-0.4.0-x86_64.AppImage --appimage-extract     # unpacks to ./squashfs-root
    find squashfs-root -name '*.so*'                                         # nothing is bundled
    ```
 

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- "Show all files": the in-app folder browser + engine write ordinary paths; SAF URIs are unusable by a std::fs engine. Sideload tool, user grants from settings. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+
+    <!-- The app is the Rust cdylib behind android.app.NativeActivity (winit + android-activity
+         C glue inside libpawchive_gui.so). The only Java is ShareImportActivity, the share/link
+         entry point (hasCode=true is for that class alone). -->
+    <application
+        android:allowBackup="false"
+        android:hasCode="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Pawchive Downloader">
+        <!-- singleTask: there must only ever be ONE NativeActivity in the process. A second one
+             means a second winit EventLoop, which winit refuses, and the process exits. -->
+        <activity
+            android:name="android.app.NativeActivity"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|density|navigation|uiMode"
+            android:exported="true"
+            android:label="Pawchive Downloader">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="pawchive_gui" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- Share / link entry point: see ShareImportActivity.java (writes the link to a file,
+             then brings the running app forward without relaunching it). -->
+        <activity
+            android:name=".ShareImportActivity"
+            android:exported="true"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- Only pawchive.pw links. A host-less http/https filter is dead on Android 12+
+                 (unapproved web links go to the browser) and can't be approved either; with the
+                 host declared, the user can allow it under App info > Open by default. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+                <data android:host="pawchive.pw" />
+                <data android:host="www.pawchive.pw" />
+            </intent-filter>
+        </activity>
+
+    </application>
+</manifest>
