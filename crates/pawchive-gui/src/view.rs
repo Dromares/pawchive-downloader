@@ -1497,13 +1497,9 @@ fn row_look(p: &Pal, r: &Row, phase: Phase, slow: bool, now: Instant) -> RowLook
                 sized: false,
             }
         }
-        RowState::Done => {
-            RowLook { glyph: Glyph::Text(OK), color: p.ok, text: "Done".into(), bar: None, sized: false }
-        }
+        RowState::Done => RowLook { glyph: Glyph::Text(OK), color: p.ok, text: "Done".into(), bar: None, sized: false },
         RowState::Skipped => {
-            RowLook {
-                glyph: Glyph::Text(OK), color: p.ink_dim, text: "Already saved".into(), bar: None, sized: false
-            }
+            RowLook { glyph: Glyph::Text(OK), color: p.ink_dim, text: "Already saved".into(), bar: None, sized: false }
         }
         RowState::Failed { .. } => {
             RowLook { glyph: Glyph::Text("×"), color: p.bad, text: "Failed".into(), bar: None, sized: false }

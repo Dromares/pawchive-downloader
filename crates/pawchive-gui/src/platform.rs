@@ -8,9 +8,7 @@ pub fn install_paths() {
     {
         let pkg = std::fs::read("/proc/self/cmdline")
             .ok()
-            .and_then(|b| {
-                String::from_utf8(b.split(|c| *c == 0).next().unwrap_or(&[]).to_vec()).ok()
-            })
+            .and_then(|b| String::from_utf8(b.split(|c| *c == 0).next().unwrap_or(&[]).to_vec()).ok())
             .filter(|s| s.contains('.'))
             .unwrap_or_else(|| "pw.pawchive.downloader".to_string());
         let home = format!("/data/data/{pkg}");
@@ -43,9 +41,7 @@ pub fn default_output() -> String {
         let pkg = std::env::var("ANDROID_PKG").unwrap_or_else(|_| {
             std::fs::read("/proc/self/cmdline")
                 .ok()
-                .and_then(|b| {
-                    String::from_utf8(b.split(|c| *c == 0).next().unwrap_or(&[]).to_vec()).ok()
-                })
+                .and_then(|b| String::from_utf8(b.split(|c| *c == 0).next().unwrap_or(&[]).to_vec()).ok())
                 .unwrap_or_else(|| "pw.pawchive.downloader".to_string())
         });
         let dir = format!("/storage/emulated/0/Android/data/{pkg}/files/pawchive");

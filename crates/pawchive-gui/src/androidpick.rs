@@ -64,7 +64,7 @@ impl FolderPicker {
                     }
                     entries.push((name, is_dir));
                 }
-                entries.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+                entries.sort_by_key(|a| a.0.to_lowercase());
             }
             Err(why) => self.note = Some(format!("Can't read this folder: {why}.")),
         }
@@ -90,7 +90,9 @@ impl FolderPicker {
                             self.refresh();
                         }
                     }
-                    ui.add(egui::Label::new(RichText::new(self.path.display().to_string()).weak().size(12.0)).truncate());
+                    ui.add(
+                        egui::Label::new(RichText::new(self.path.display().to_string()).weak().size(12.0)).truncate(),
+                    );
                 });
                 let blocked = !writable(&self.path);
                 if blocked || self.note.is_some() {
@@ -141,10 +143,11 @@ impl FolderPicker {
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     if matches!(self.mode, PickMode::Folders) {
-                        let raw =
-                            self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| {
-                                self.path.display().to_string()
-                            });
+                        let raw = self
+                            .path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| self.path.display().to_string());
                         let name: String = if raw.chars().count() > 24 {
                             let head: String = raw.chars().take(22).collect();
                             format!("{head}...")

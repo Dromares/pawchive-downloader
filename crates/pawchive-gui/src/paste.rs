@@ -47,7 +47,9 @@ pub(crate) fn link_from_shared_text(raw: &str) -> Option<String> {
             let tail = &raw[i..];
             let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
             tail[..end]
-                .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '>' | '"' | '\''))
+                .trim_end_matches(|c: char| {
+                    matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '>' | '"' | '\'')
+                })
                 .to_owned()
         }
         None => raw.trim().to_owned(),
@@ -66,8 +68,8 @@ pub fn clipboard_text() -> Option<String> {
         // As daemon: the guard must NOT detach on drop, because this thread belongs to winit.
         let mut env = vm.attach_current_thread_as_daemon().ok()?;
         let app_ctx = rt.context() as jni::sys::jobject; // the Application object: a Context
-        // This thread never returns to Java, so a plain local ref would live forever (jni 0.21's
-        // JObject frees nothing on drop). A local frame frees everything made inside it.
+                                                         // This thread never returns to Java, so a plain local ref would live forever (jni 0.21's
+                                                         // JObject frees nothing on drop). A local frame frees everything made inside it.
         let text = env
             .with_local_frame(16, |env| -> jni::errors::Result<Option<String>> { Ok(read_clipboard(env, app_ctx)) })
             .ok()
@@ -102,17 +104,19 @@ unsafe fn read_clipboard(env: &mut jni::JNIEnv<'_>, app_ctx: jni::sys::jobject) 
     if clip.is_null() {
         return None; // empty, or Android refused the read
     }
-    let item = env
-        .call_method(&clip, "getItemAt", "(I)Landroid/content/ClipData$Item;", &[JValue::Int(0)])
-        .ok()?
-        .l()
-        .ok()?;
+    let item =
+        env.call_method(&clip, "getItemAt", "(I)Landroid/content/ClipData$Item;", &[JValue::Int(0)]).ok()?.l().ok()?;
     if item.is_null() {
         return None;
     }
     // coerceToText lives on ClipData.Item (not ClipData) and turns URI/Intent clips into text too.
     let chars = env
-        .call_method(&item, "coerceToText", "(Landroid/content/Context;)Ljava/lang/CharSequence;", &[JValue::Object(&ctx)])
+        .call_method(
+            &item,
+            "coerceToText",
+            "(Landroid/content/Context;)Ljava/lang/CharSequence;",
+            &[JValue::Object(&ctx)],
+        )
         .ok()?
         .l()
         .ok()?;
@@ -133,9 +137,18 @@ mod tests {
     fn keeps_only_the_link_from_a_browser_share() {
         let shared = "ElysianRagazza | Pawchive https://pawchive.pw/patreon/user/163211671";
         assert_eq!(pick(shared).as_deref(), Some("https://pawchive.pw/patreon/user/163211671"));
-        assert_eq!(pick("https://pawchive.pw/fanbox/user/1386751\n").as_deref(), Some("https://pawchive.pw/fanbox/user/1386751"));
-        assert_eq!(pick("look (https://pawchive.pw/patreon/user/5).").as_deref(), Some("https://pawchive.pw/patreon/user/5"));
-        assert_eq!(pick("http://pawchive.pw/patreon/user/5?o=50 more").as_deref(), Some("http://pawchive.pw/patreon/user/5?o=50"));
+        assert_eq!(
+            pick("https://pawchive.pw/fanbox/user/1386751\n").as_deref(),
+            Some("https://pawchive.pw/fanbox/user/1386751")
+        );
+        assert_eq!(
+            pick("look (https://pawchive.pw/patreon/user/5).").as_deref(),
+            Some("https://pawchive.pw/patreon/user/5")
+        );
+        assert_eq!(
+            pick("http://pawchive.pw/patreon/user/5?o=50 more").as_deref(),
+            Some("http://pawchive.pw/patreon/user/5?o=50")
+        );
     }
 
     #[test]

@@ -535,17 +535,24 @@ impl App {
             let (mode, start) = match which {
                 Picker::Output => (
                     crate::androidpick::PickMode::Folders,
-                    PathBuf::from(self.output.trim()).parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/storage/emulated/0")),
+                    PathBuf::from(self.output.trim())
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| PathBuf::from("/storage/emulated/0")),
                 ),
                 Picker::CookieFile => (
                     crate::androidpick::PickMode::Files,
-                    self.settings.cookie_file.as_deref().and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/storage/emulated/0")),
+                    self.settings
+                        .cookie_file
+                        .as_deref()
+                        .and_then(|p| p.parent())
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| PathBuf::from("/storage/emulated/0")),
                 ),
             };
             let start = if start.is_dir() { start } else { PathBuf::from("/storage/emulated/0") };
             self.folder_picker = Some(crate::androidpick::FolderPicker::new(which, mode, start));
             ctx.request_repaint();
-            return;
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -819,17 +826,18 @@ impl App {
         {
             // No save dialog on Android: the export lands in the output folder (its platform
             // default when none was picked), named by the menu item that started it.
-            let dir = dir
-                .unwrap_or_else(|| PathBuf::from(crate::platform::default_output()));
+            let dir = dir.unwrap_or_else(|| PathBuf::from(crate::platform::default_output()));
             let path = dir.join(name).with_extension(fmt.ext());
             std::thread::spawn(move || {
-                let _ = tx.send(path.parent().map_or(Ok(()), std::fs::create_dir_all)
-                    .and_then(|()| std::fs::write(&path, bytes))
-                    .map(|()| path)
-                    .map_err(|e| e.to_string()));
+                let _ = tx.send(
+                    path.parent()
+                        .map_or(Ok(()), std::fs::create_dir_all)
+                        .and_then(|()| std::fs::write(&path, bytes))
+                        .map(|()| path)
+                        .map_err(|e| e.to_string()),
+                );
                 ctx.request_repaint();
             });
-            return;
         }
         #[cfg(not(target_os = "android"))]
         std::thread::spawn(move || {
@@ -1007,7 +1015,9 @@ impl App {
             |l, r, t, b| Frame::new().fill(pal.bg).inner_margin(Margin { left: l, right: r, top: t, bottom: b });
         let (m, s) = (S4 as i8, 10);
 
-        egui::Panel::top("title").frame(panel(m, m, 12 + crate::platform::top_inset() as i8, s)).show(ui, |ui| self.titlebar(ui, &pal, &mut acts));
+        egui::Panel::top("title")
+            .frame(panel(m, m, 12 + crate::platform::top_inset() as i8, s))
+            .show(ui, |ui| self.titlebar(ui, &pal, &mut acts));
         // Tab order is widget creation order (UI-SPEC §7: the bottom bar is last), but the bar's panel
         // must be declared before the central area to claim its strip. So the panel only reserves the
         // strip; the bar's widgets are created after everything else, into that rect.

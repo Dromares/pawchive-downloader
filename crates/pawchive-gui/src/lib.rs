@@ -1,10 +1,9 @@
 //! Pawchive Downloader: the egui front end. All network work happens in `pawchive-core`'s
 //! session thread; this binary only draws state and forwards input.
 
-mod app;
 #[cfg(target_os = "android")]
 mod androidpick;
-mod paste;
+mod app;
 mod derive;
 mod dev;
 mod format;
@@ -13,6 +12,7 @@ mod library_view;
 mod links_state;
 mod links_view;
 mod modals;
+mod paste;
 mod platform;
 mod state;
 mod theme;
@@ -66,8 +66,7 @@ fn open_library() -> Result<pawchive_core::library::Library, String> {
 /// (without it `run_native` fails with "NativeOptions is missing required `android_app`"),
 /// so it is stashed here and picked up in `main`.
 #[cfg(target_os = "android")]
-static ANDROID_APP: std::sync::Mutex<Option<android_activity::AndroidApp>> =
-    std::sync::Mutex::new(None);
+static ANDROID_APP: std::sync::Mutex<Option<android_activity::AndroidApp>> = std::sync::Mutex::new(None);
 
 /// The stashed activity handle for Android-only code (intents, configs). None on desktop paths.
 #[cfg(target_os = "android")]
@@ -96,17 +95,13 @@ pub fn main() -> eframe::Result {
     if let Some(base) = dev::base_url_override() {
         hosts = Hosts { api: base.clone(), file: base.clone(), thumb: base.clone(), external: Some(base) };
     }
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Pawchive Downloader")
-        .with_app_id(APP_ID);
+    let mut viewport = egui::ViewportBuilder::default().with_title("Pawchive Downloader").with_app_id(APP_ID);
     // Desktop-only: fixed start size and a minimum the user can't shrink below. On Android the
     // window is the whole screen and a phone's viewport (≈500 logical dp tall in landscape) can
     // be SMALLER than a 900x600 minimum, so a hard min risks refusing to create the window.
     #[cfg(not(target_os = "android"))]
     {
-        viewport = viewport
-            .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([900.0, 600.0]);
+        viewport = viewport.with_inner_size([1120.0, 760.0]).with_min_inner_size([900.0, 600.0]);
     }
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);

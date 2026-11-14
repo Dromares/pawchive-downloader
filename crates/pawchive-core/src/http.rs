@@ -13,9 +13,7 @@ use reqwest::{Client, RequestBuilder, Response, StatusCode};
 fn builder() -> reqwest::ClientBuilder {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let tls = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let tls = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
     Client::builder().use_preconfigured_tls(tls)
 }
 
@@ -23,7 +21,6 @@ fn builder() -> reqwest::ClientBuilder {
 fn builder() -> reqwest::ClientBuilder {
     Client::builder()
 }
-
 
 use crate::control::Control;
 use crate::cookies::CookieJar;
