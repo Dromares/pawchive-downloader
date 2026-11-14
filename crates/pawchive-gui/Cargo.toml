@@ -3,6 +3,7 @@ name = "pawchive-gui"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 # `clipboard` is what links arboard and smithay-clipboard. Without it egui-winit keeps a private
