@@ -5,6 +5,19 @@ All notable changes to Pawchive Downloader are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-14
+
+### Added
+
+- **Android.** The app now runs on Android phones (arm64, Android 8.0+) as a sideloaded APK, built from
+  `android/` with `scripts/build-android.sh`. Links come in through the browser's **Share** menu or a
+  **Paste** button (the Android build cannot take keyboard input), and a link shared during a download waits
+  instead of interrupting it. Tapped `pawchive.pw` links can open the app once allowed under *Open by
+  default*. Downloads go to the app's folder under `Android/data/` by default; an in-app folder browser
+  picks other folders after *All files access* is granted. Phone screens get a single-column layout, and
+  Settings scrolls and fits the screen.
+- The project is licensed under MIT.
+
 ### Fixed
 
 - After an Update that finds nothing, a partly downloaded profile no longer says `0 new files` beside a

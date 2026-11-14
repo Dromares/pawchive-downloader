@@ -1,0 +1,39 @@
+plugins {
+    id 'com.android.application'
+}
+
+// One version for the whole project: read it from the Cargo workspace instead of repeating it here.
+def cargoVersion = (file('../../Cargo.toml').text =~ /(?m)^version\s*=\s*"([^"]+)"/)[0][1]
+def (vMajor, vMinor, vPatch) = cargoVersion.tokenize('.-').take(3).collect { it as int }
+
+android {
+    namespace 'pw.pawchive.downloader'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'pw.pawchive.downloader'
+        minSdk 26
+        targetSdk 34
+        // 0.4.0 -> 400; must only ever go up (the 0.3.0-android.N test builds used 3..12).
+        versionCode vMajor * 10000 + vMinor * 100 + vPatch
+        versionName cargoVersion
+    }
+
+    buildTypes {
+        release {
+            // Sideload build, signed with the local debug key (~/.android/debug.keystore). Keep that
+            // keystore backed up: an APK signed with a different key cannot update an installed one.
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
+    }
+
+    sourceSets {
+        main {
+            // Filled by scripts/build-android.sh (cargo ndk -o); whatever ABIs are there get packaged.
+            jniLibs.srcDirs = ['nativeLibs']
+        }
+    }
+
+    lint { abortOnError false }
+}

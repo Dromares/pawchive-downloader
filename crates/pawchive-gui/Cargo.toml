@@ -12,7 +12,7 @@ license.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Only for `localtime_r`, to show "Last scanned" in the user's own time zone (already in the tree via eframe).
 libc = "0.2"
-pawchive-core = { version = "0.3.0", path = "../pawchive-core" }
+pawchive-core = { version = "0.4.0", path = "../pawchive-core" }
 
 # The binary is named after the app id (see `APP_ID` in `src/main.rs`) so that the desktop entry,
 # the icon name and the window's Wayland app_id / X11 WM_CLASS all agree.
